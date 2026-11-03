@@ -116,7 +116,16 @@ static inline v8f cmulc(v8f a, v8f b)
 #define CLOCK_SETTLE 20      /* data symbols before frames are decoded */
 #define KF 0.05              /* carrier loop gain, per symbol */
 #define KF_ACQ 0.5           /* the same, on the first data symbols */
-#define LDPC_ITER 50
+/* LDPC iterations: near the threshold, a batch of frames runs until its
+ * slowest frame converges, so the cap sets the cost (32K 256-QAM 2/3 at
+ * 18.5 dB: 6.8 s of CPU for 3 s of signal at 50, 4.5 s at 30, the same
+ * frames decoded). When frames queue up for the FEC threads, a lower cap
+ * loses a few more blocks instead of dropping input samples (whole frames
+ * and a resynchronisation). */
+#ifndef LDPC_ITER
+#define LDPC_ITER 30
+#endif
+#define LDPC_ITER_BUSY 15
 #define MAX_FEC 1024         /* FEC blocks of one PLP per frame */
 #define KPAD 27848           /* carrier arrays: 32K extended (27841), whole vectors */
 
@@ -544,7 +553,7 @@ static void make_p1(struct p1tab* t)
 
 /* One frame's PLP for the FEC thread: its signalling and its cells after
  * time deinterleaving. */
-#define NFEC 2         /* FEC threads: 64-QAM 3/4 at 32 Mbit/s needs more than a core */
+#define NFEC 3         /* FEC threads: near the threshold LDPC needs more than two cores */
 #define NJOB (NFEC + 1) /* frame buffers: one being filled, one per FEC thread */
 
 struct fecjob {
@@ -2083,7 +2092,7 @@ static void decode_plp(drx_dvbt2* d)
 }
 
 /* FEC thread: one frame's PLP, from the time-deinterleaved cells to TS. */
-static void decode_job(struct fecwork* d, struct fecjob* job)
+static void decode_job(struct fecwork* d, struct fecjob* job, int max_iter)
 {
     const struct plp* q = &job->q;
     job->nblocks = 0;
@@ -2268,7 +2277,7 @@ static void decode_job(struct fecwork* d, struct fecjob* job)
         }
         nl++;
         if (nl == lanes || b == nblocks - 1) {
-            const int it = drx_ldpc_decode(d->ldpc, (const int8_t* const*)d->llr, d->cw, nl, LDPC_ITER);
+            const int it = drx_ldpc_decode(d->ldpc, (const int8_t* const*)d->llr, d->cw, nl, max_iter);
             (void)it;
             for (int f = 0; f < nl; f++) {
                 const int fb = b - nl + 1 + f;
@@ -2326,8 +2335,12 @@ static void* fec_thread(void* arg)
             continue;
         }
         job->state = JOB_BUSY;
+        /* another frame already waiting: the FEC threads are behind */
+        int waiting = 0;
+        for (int k = 0; k < NJOB; k++)
+            waiting += d->job[k].state == JOB_READY;
         pthread_mutex_unlock(&d->fec_lock);
-        decode_job(w, job);
+        decode_job(w, job, waiting ? LDPC_ITER_BUSY : LDPC_ITER);
         pthread_mutex_lock(&d->fec_lock);
         while (job->seq != d->emit_seq)
             pthread_cond_wait(&d->fec_cv, &d->fec_lock);
