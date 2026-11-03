@@ -1,0 +1,6 @@
+# Optional drop-in for /etc/systemd/system/dvbrxd@.service.d/cpu.conf:
+# USB interrupts on the last CPU, receiver on the other ones. Adjust the
+# CPU list to the machine (here 4 CPUs: 0-2 for dvbrx, 3 for USB).
+[Service]
+ExecStartPre=+/usr/local/sbin/dvbrx-irq-pin
+CPUAffinity=0-2

@@ -1,0 +1,4 @@
+-Iinclude
+-I../kernel
+-std=gnu11
+-D_GNU_SOURCE

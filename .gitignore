@@ -1,0 +1,7 @@
+/work/
+/prefix/
+/third_party/
+__pycache__/
+/libdvbrx/build/
+/gr-dvbrx/build/
+/python/dvbrx/*.so

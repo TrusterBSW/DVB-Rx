@@ -1,0 +1,2 @@
+# dvbrx control devices, for dvbrx running as the unprivileged user dvbrxd
+KERNEL=="dvbrx[0-9]*", SUBSYSTEM=="misc", GROUP="video", MODE="0660"

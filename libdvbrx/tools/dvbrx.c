@@ -1,0 +1,1521 @@
+/*
+ * dvbrx: real-time DVB receiver (S/S2/S2X, C, T, T2) for a USRP (UHD) or an
+ * IQ file; runs as the dvbrxd@N service in DVB bridge mode.
+ *
+ * Standalone:  dvbrx (-u ARGS -f FREQ | -F FILE) -s SYMRATE [-o DEST] ...
+ * DVB bridge:  dvbrx -d N (-u ARGS | -F FILE) [-L LNB] ...
+ *   Serves /dev/dvb/adapterN through the dvbrx kernel module: tuning
+ *   requests come from the applications (frequency = L-band IF, symbol
+ *   rate, ISI, PLS gold code), the transport stream goes to the adapter's
+ *   demux, LNB commands go to the LNB controller (-L).
+ *
+ * Options:
+ *   -u ARGS     UHD device arguments, e.g. "type=b200"
+ *   -F FILE     fc32 IQ file (bridge mode: looped in real time, frequency
+ *               ignored)
+ *   -f HZ       centre frequency (standalone)
+ *   -s SYMRATE  symbol rate (standalone)
+ *   -S RATE     sample rate (standalone, default 2 x symbol rate); bridge
+ *               mode: maximum sample rate (default 56e6)
+ *   -G DB       receive gain (default 40), or "auto": kept for a mean input
+ *               level of -24 dBFS, lowered at once if the ADC clips
+ *   -A ANT      receive antenna, e.g. "TX/RX" or "RX2" (default: UHD's)
+ *   -M HZ       master clock rate (default: chosen by UHD)
+ *   -r ROLLOFF  roll-off (standalone, default 0.2)
+ *   -D SYMBOLS  matched filter half-length (default: from the roll-off)
+ *   -g GOLD     PL scrambling gold code (standalone, default 0), rN: root code
+ *   -l RATE     standalone: DVB-S (first generation) instead of DVB-S2, code
+ *               rate "auto", "1/2", "2/3", "3/4", "5/6" or "7/8"
+ *   -c QAM      standalone: DVB-C instead of DVB-S2, "auto", 16, 32, 64, 128
+ *               or 256 (roll-off 0.15)
+ *   -T MHZ      standalone: DVB-T, channel bandwidth (8, 7, 6, 5); no -s
+ *   -2 MHZ      standalone: DVB-T2, channel bandwidth; -i selects the PLP
+ *   -i ISI      input stream (standalone; default: all, UDP port + ISI)
+ *   -o DEST     standalone output: "-" (stdout, default), a file, or
+ *               udp://HOST:PORT
+ *   -d N        DVB bridge on /dev/dvbrxN
+ *   -L LNB      LNB controller: "none" (default), "serial:/dev/ttyACM0" or
+ *               "udp:HOST:PORT" (text protocol, see doc/lnb-protocol.md)
+ *   -t N        LDPC threads (default 2)
+ *   -R          standalone file source: play at the sample rate, in a loop
+ */
+#include "dvbrx/chan.h"
+#include "dvbrx/dvbc.h"
+#include "dvbrx/dvbs.h"
+#include "dvbrx/dvbt.h"
+#include "dvbrx/pl.h"
+#include "dvbrx/rxmt.h"
+#include "dvbrx_ioctl.h"
+
+#include <arpa/inet.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <limits.h>
+#include <math.h>
+#include <linux/dvb/frontend.h>
+#include <netdb.h>
+#include <poll.h>
+#include <pthread.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
+#include <termios.h>
+#include <time.h>
+#include <unistd.h>
+
+#ifdef HAVE_UHD
+#include <uhd.h>
+#endif
+
+static volatile sig_atomic_t stop;
+static void on_signal(int sig)
+{
+    (void)sig;
+    stop = 1;
+}
+
+static double now(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return t.tv_sec + 1e-9 * t.tv_nsec;
+}
+
+/* ---- radio: a sample source feeding the receiver from its own thread --------- */
+
+struct radio {
+    const char* uhd_args;
+    const char* file;
+    int file_loop;     /* restart the file at its end */
+    int file_realtime; /* pace the file at the sample rate, drop when late */
+    double gain, mcr, gain_max;
+    int gain_auto; /* -G auto: gain from the measured level (UHD) */
+    const char* antenna;
+
+    /* current run */
+    double freq, rate;
+    drx_mt* mt;
+    /* when set, samples go there instead of mt (several channels) */
+    void (*sink)(void* ctx, const float* iq, int n);
+    void* sink_ctx;
+    pthread_t thread;
+    volatile int running;
+    int started;
+    uint64_t samples, overflows, filled;
+    /* input level, measured on the radio thread: mean power (dBFS) and
+     * clipped samples (|I| or |Q| near full scale) over the last window */
+    volatile float level_dbfs, clip_ppm;
+    volatile int eof;
+
+#ifdef HAVE_UHD
+    uhd_usrp_handle usrp;
+    uhd_rx_streamer_handle rx;
+    uhd_rx_metadata_handle md;
+#endif
+};
+
+static void radio_deliver(struct radio* r, const float* iq, int n, int nonblock)
+{
+    if (r->sink)
+        r->sink(r->sink_ctx, iq, n);
+    else
+        drx_mt_push(r->mt, iq, n, nonblock);
+}
+
+static void* file_thread(void* arg)
+{
+    struct radio* r = arg;
+    FILE* f = fopen(r->file, "rb");
+    if (!f) {
+        perror(r->file);
+        r->eof = 1;
+        return NULL;
+    }
+    enum { N = 65536 };
+    float* buf = malloc(sizeof(float) * 2 * N);
+    const double t0 = now();
+    uint64_t total = 0;
+    while (r->running) {
+        size_t n = fread(buf, 8, N, f);
+        if (n == 0) {
+            if (!r->file_loop)
+                break;
+            rewind(f);
+            continue;
+        }
+        if (r->file_realtime) {
+            double wait = t0 + (total + n) / r->rate - now();
+            if (wait > 0)
+                usleep((useconds_t)(wait * 1e6));
+        }
+        radio_deliver(r, buf, (int)n, r->file_realtime);
+        total += n;
+        r->samples = total;
+    }
+    r->eof = 1;
+    free(buf);
+    fclose(f);
+    return NULL;
+}
+
+#ifdef HAVE_UHD
+static int uhd_open(struct radio* r)
+{
+    if (r->usrp)
+        return 0;
+    if (uhd_usrp_make(&r->usrp, r->uhd_args) || uhd_rx_streamer_make(&r->rx) ||
+        uhd_rx_metadata_make(&r->md)) {
+        fprintf(stderr, "UHD: cannot open \"%s\"\n", r->uhd_args);
+        return -1;
+    }
+    if (r->mcr > 0)
+        uhd_usrp_set_master_clock_rate(r->usrp, r->mcr, 0);
+    uhd_meta_range_handle range;
+    r->gain_max = 60;
+    if (!uhd_meta_range_make(&range)) {
+        if (!uhd_usrp_get_rx_gain_range(r->usrp, "", 0, range))
+            uhd_meta_range_stop(range, &r->gain_max);
+        uhd_meta_range_free(&range);
+    }
+    size_t chan = 0;
+    uhd_stream_args_t sa = {
+        .cpu_format = "fc32",
+        .otw_format = "sc16",
+        .args = "",
+        .channel_list = &chan,
+        .n_channels = 1,
+    };
+    return uhd_usrp_get_rx_stream(r->usrp, &sa, r->rx) ? -1 : 0;
+}
+
+/* Input level and automatic gain (-G auto). The level is the mean power
+ * over windows of LEVEL_WIN seconds; the gain keeps it near AGC_TARGET
+ * (dBFS: OFDM and QAM peaks stay ~10 dB below full scale), within
+ * AGC_HYST, and drops at once when the ADC clips. A change is only made
+ * every other window (the level after a change is not representative). */
+#define LEVEL_WIN 0.5
+#define AGC_TARGET -24.0
+#define AGC_HYST 4.0
+#define AGC_CLIP 1e-5 /* fraction of clipped samples */
+
+struct level {
+    double pow;
+    uint64_t n, clip;
+    int skip;
+};
+
+static void radio_level(struct radio* r, struct level* lv, const float* iq, int n)
+{
+    double p = 0;
+    uint64_t c = 0;
+    for (int i = 0; i < 2 * n; i++) {
+        const float v = iq[i];
+        p += (double)v * v;
+        c += v > 0.95f || v < -0.95f;
+    }
+    lv->pow += p;
+    lv->clip += c;
+    lv->n += n;
+    if (lv->n < LEVEL_WIN * r->rate)
+        return;
+    const double dbfs = 10 * log10(lv->pow / lv->n + 1e-20);
+    const double clip = (double)lv->clip / (2.0 * lv->n);
+    r->level_dbfs = (float)dbfs;
+    r->clip_ppm = (float)(clip * 1e6);
+    lv->pow = 0;
+    lv->n = lv->clip = 0;
+#ifdef HAVE_UHD
+    if (!r->gain_auto || r->file)
+        return;
+    if (lv->skip) {
+        lv->skip = 0;
+        return;
+    }
+    double g = r->gain;
+    if (clip > AGC_CLIP)
+        g -= clip > 1e-2 ? 10 : 6; /* heavy clipping: the level is not measurable */
+    else if (dbfs < AGC_TARGET - AGC_HYST || dbfs > AGC_TARGET + AGC_HYST)
+        g += fmax(-10, fmin(10, AGC_TARGET - dbfs));
+    g = fmax(0, fmin(r->gain_max, round(g)));
+    if (g != r->gain) {
+        uhd_usrp_set_rx_gain(r->usrp, g, 0, "");
+        uhd_usrp_get_rx_gain(r->usrp, 0, "", &g);
+        fprintf(stderr, "AGC: level %.1f dBFS, clipping %.0f ppm: gain %.0f -> %.0f dB\n", dbfs,
+                clip * 1e6, r->gain, g);
+        r->gain = g;
+        lv->skip = 1;
+    }
+#endif
+}
+
+/* Samples lost in an overflow are replaced by as many zeros (up to this
+ * long): the receivers keep their timing (an OFDM receiver loses a few
+ * symbols instead of its frame synchronisation). */
+#define MAX_FILL 0.25 /* seconds */
+
+static void radio_fill(struct radio* r, double lost)
+{
+    static const float zeros[2 * 8192];
+    uint64_t left = (uint64_t)llround(lost);
+    while (left && r->running) {
+        const int n = left < 8192 ? (int)left : 8192;
+        radio_deliver(r, zeros, n, 1);
+        left -= n;
+    }
+}
+
+static void* uhd_thread(void* arg)
+{
+    struct radio* r = arg;
+    size_t spb;
+    uhd_rx_streamer_max_num_samps(r->rx, &spb);
+    enum { N = 65536 };
+    float* buf = malloc(sizeof(float) * 2 * N);
+    uhd_stream_cmd_t cmd = { .stream_mode = UHD_STREAM_MODE_START_CONTINUOUS,
+                             .stream_now = true };
+    uhd_rx_streamer_issue_stream_cmd(r->rx, &cmd);
+    double t_next = -1; /* device time of the next sample expected */
+    struct level lv = { 0 };
+    while (r->running) {
+        size_t got = 0;
+        while (got < N && r->running) {
+            void* p = buf + 2 * got;
+            size_t n = 0;
+            uhd_rx_streamer_recv(r->rx, &p, N - got < spb ? N - got : spb, &r->md, 1.0,
+                                 false, &n);
+            bool has_time = false;
+            uhd_rx_metadata_has_time_spec(r->md, &has_time);
+            if (n > 0 && has_time) {
+                int64_t full;
+                double frac;
+                uhd_rx_metadata_time_spec(r->md, &full, &frac);
+                const double t = (double)full + frac;
+                const double lost = t_next < 0 ? 0 : (t - t_next) * r->rate;
+                if (lost >= 1 && lost < MAX_FILL * r->rate) {
+                    radio_deliver(r, buf, (int)got, 1);
+                    radio_fill(r, lost);
+                    memmove(buf, buf + 2 * got, sizeof(float) * 2 * n);
+                    got = 0;
+                    r->filled += (uint64_t)llround(lost);
+                }
+                t_next = t + n / r->rate;
+            }
+            uhd_rx_metadata_error_code_t err;
+            uhd_rx_metadata_error_code(r->md, &err);
+            if (err == UHD_RX_METADATA_ERROR_CODE_OVERFLOW) {
+                r->overflows++;
+            } else if (err == UHD_RX_METADATA_ERROR_CODE_TIMEOUT) {
+                /* After an overflow the B2xx may stop streaming: restart. */
+                fprintf(stderr, "UHD: receive timeout, restarting the stream\n");
+                cmd.stream_mode = UHD_STREAM_MODE_STOP_CONTINUOUS;
+                uhd_rx_streamer_issue_stream_cmd(r->rx, &cmd);
+                cmd.stream_mode = UHD_STREAM_MODE_START_CONTINUOUS;
+                uhd_rx_streamer_issue_stream_cmd(r->rx, &cmd);
+            } else if (err != UHD_RX_METADATA_ERROR_CODE_NONE) {
+                fprintf(stderr, "UHD receive error %d\n", (int)err);
+            }
+            got += n;
+        }
+        /* Never block the radio: drop samples if the receiver is behind. */
+        radio_level(r, &lv, buf, (int)got);
+        radio_deliver(r, buf, (int)got, 1);
+        r->samples += got;
+    }
+    cmd.stream_mode = UHD_STREAM_MODE_STOP_CONTINUOUS;
+    uhd_rx_streamer_issue_stream_cmd(r->rx, &cmd);
+    free(buf);
+    return NULL;
+}
+#endif
+
+/* Tune the source; returns the sample rate actually obtained (the USRP may
+ * round it, e.g. to its master clock divided by an integer), or -1. */
+static double radio_configure(struct radio* r, double freq, double rate)
+{
+    r->freq = freq;
+    r->rate = rate;
+    if (r->file)
+        return rate;
+#ifdef HAVE_UHD
+    if (uhd_open(r))
+        return -1;
+    uhd_usrp_set_rx_rate(r->usrp, rate, 0);
+    uhd_usrp_set_rx_gain(r->usrp, r->gain, 0, "");
+    uhd_usrp_get_rx_gain(r->usrp, 0, "", &r->gain);
+    if (r->antenna && uhd_usrp_set_rx_antenna(r->usrp, r->antenna, 0))
+        fprintf(stderr, "UHD: cannot select antenna \"%s\"\n", r->antenna);
+    uhd_tune_request_t req = { .target_freq = freq,
+                               .rf_freq_policy = UHD_TUNE_REQUEST_POLICY_AUTO,
+                               .dsp_freq_policy = UHD_TUNE_REQUEST_POLICY_AUTO };
+    uhd_tune_result_t tune;
+    uhd_usrp_set_rx_freq(r->usrp, &req, 0, &tune);
+    double actual = rate;
+    uhd_usrp_get_rx_rate(r->usrp, 0, &actual);
+    fprintf(stderr, "UHD: %.3f MHz, %.6f Msps (asked %.6f), gain %.1f dB\n",
+            tune.actual_rf_freq / 1e6, actual / 1e6, rate / 1e6, r->gain);
+    r->rate = actual;
+    return actual;
+#else
+    fprintf(stderr, "built without UHD support\n");
+    return -1;
+#endif
+}
+
+/* Moves the centre frequency, the sample rate and the stream unchanged. */
+static void radio_retune(struct radio* r, double freq)
+{
+    r->freq = freq;
+#ifdef HAVE_UHD
+    if (r->file || !r->usrp)
+        return;
+    uhd_tune_request_t req = { .target_freq = freq,
+                               .rf_freq_policy = UHD_TUNE_REQUEST_POLICY_AUTO,
+                               .dsp_freq_policy = UHD_TUNE_REQUEST_POLICY_AUTO };
+    uhd_tune_result_t tune;
+    uhd_usrp_set_rx_freq(r->usrp, &req, 0, &tune);
+    fprintf(stderr, "UHD: retuned to %.3f MHz\n", tune.actual_rf_freq / 1e6);
+#endif
+}
+
+/* Start feeding mt (or the sink) from the configured source. */
+static int radio_start(struct radio* r, drx_mt* mt)
+{
+    r->mt = mt;
+    r->samples = r->overflows = r->filled = 0;
+    r->eof = 0;
+    r->running = 1;
+#ifdef HAVE_UHD
+    pthread_create(&r->thread, NULL, r->file ? file_thread : uhd_thread, r);
+#else
+    pthread_create(&r->thread, NULL, file_thread, r);
+#endif
+    r->started = 1;
+    return 0;
+}
+
+static void radio_stop(struct radio* r)
+{
+    if (!r->started)
+        return;
+    r->running = 0;
+    pthread_join(r->thread, NULL);
+    r->started = 0;
+}
+
+static void radio_close(struct radio* r)
+{
+    radio_stop(r);
+#ifdef HAVE_UHD
+    if (r->usrp) {
+        uhd_rx_metadata_free(&r->md);
+        uhd_rx_streamer_free(&r->rx);
+        uhd_usrp_free(&r->usrp);
+    }
+#endif
+}
+
+/* ---- standalone output ---------------------------------------------------- */
+
+struct output {
+    FILE* file;
+    int sock;
+    struct sockaddr_storage addr;
+    socklen_t addrlen;
+    int per_isi_port;
+    uint8_t dgram[256][7 * 188]; /* per-ISI UDP datagram being filled */
+    int fill[256];
+};
+
+static int output_open(struct output* o, const char* dest, int all_isi)
+{
+    memset(o, 0, sizeof(*o));
+    o->sock = -1;
+    if (!strncmp(dest, "udp://", 6)) {
+        char host[256];
+        snprintf(host, sizeof(host), "%s", dest + 6);
+        char* colon = strrchr(host, ':');
+        if (!colon)
+            return -1;
+        *colon = 0;
+        struct addrinfo hints = { .ai_family = AF_UNSPEC, .ai_socktype = SOCK_DGRAM }, *ai;
+        if (getaddrinfo(host, colon + 1, &hints, &ai))
+            return -1;
+        o->sock = socket(ai->ai_family, SOCK_DGRAM, 0);
+        memcpy(&o->addr, ai->ai_addr, ai->ai_addrlen);
+        o->addrlen = ai->ai_addrlen;
+        freeaddrinfo(ai);
+        o->per_isi_port = all_isi;
+        return o->sock < 0 ? -1 : 0;
+    }
+    o->file = strcmp(dest, "-") ? fopen(dest, "wb") : stdout;
+    return o->file ? 0 : -1;
+}
+
+static void on_ts_output(void* ctx, int isi, const uint8_t* ts, int len)
+{
+    struct output* o = ctx;
+    if (o->file) {
+        fwrite(ts, 1, len, o->file);
+        return;
+    }
+    for (int p = 0; p < len; p += 188) {
+        memcpy(o->dgram[isi] + o->fill[isi], ts + p, 188);
+        o->fill[isi] += 188;
+        if (o->fill[isi] == 7 * 188) {
+            struct sockaddr_storage a = o->addr;
+            if (o->per_isi_port) {
+                if (a.ss_family == AF_INET)
+                    ((struct sockaddr_in*)&a)->sin_port =
+                        htons(ntohs(((struct sockaddr_in*)&a)->sin_port) + isi);
+                else
+                    ((struct sockaddr_in6*)&a)->sin6_port =
+                        htons(ntohs(((struct sockaddr_in6*)&a)->sin6_port) + isi);
+            }
+            sendto(o->sock, o->dgram[isi], o->fill[isi], 0, (struct sockaddr*)&a, o->addrlen);
+            o->fill[isi] = 0;
+        }
+    }
+}
+
+/* ---- statistics ----------------------------------------------------------- */
+
+static void print_stats(drx_mt* mt, const struct radio* r, double t0, double symrate,
+                        const char* tag)
+{
+    drx_rx_stats s;
+    drx_mt_get_stats(mt, &s);
+    fprintf(stderr,
+            "%s[%6.1f s] %s %s %s%s%s SNR %5.2f dB freq %+8.1f kHz | frames %llu "
+            "ldpc it %.1f fail %llu | bch fail %llu | ts %llu err %llu | in %.1f Msps "
+            "drop %llu ovf %llu (%.0f ms) | %.1f dBFS%s gain %.0f\n",
+            tag, now() - t0, s.locked ? "LOCK" : "----", s.constellation ? s.constellation : "-",
+            s.rate ? s.rate : "-", s.short_frame ? " short" : "", s.pilots ? " pilots" : "",
+            s.snr_db, s.freq * symrate / 1e3, (unsigned long long)s.plframes, s.ldpc_avg_iter,
+            (unsigned long long)s.ldpc_failed_batches, (unsigned long long)s.bch_failed,
+            (unsigned long long)s.ts_packets, (unsigned long long)s.ts_crc_errors,
+            r->samples / (now() - t0) / 1e6, (unsigned long long)drx_mt_dropped(mt),
+            (unsigned long long)r->overflows, r->rate > 0 ? 1e3 * r->filled / r->rate : 0.0,
+            r->file ? 0.0f : r->level_dbfs, r->clip_ppm > 0 ? " CLIP" : "", r->file ? 0.0 : r->gain);
+}
+
+/* ---- LNB controller ------------------------------------------------------- */
+
+struct lnb {
+    int fd; /* -1: no controller */
+    int is_udp;
+    /* last state set, for adapters sharing the LNB (-1: unknown) */
+    int voltage, tone;
+    uint8_t diseqc[6];
+    int diseqc_len;
+};
+
+static int lnb_open(struct lnb* l, const char* spec)
+{
+    l->fd = -1;
+    l->is_udp = 0;
+    l->voltage = l->tone = l->diseqc_len = -1;
+    if (!spec || !strcmp(spec, "none"))
+        return 0;
+    if (!strncmp(spec, "serial:", 7)) {
+        l->fd = open(spec + 7, O_RDWR | O_NOCTTY);
+        if (l->fd < 0) {
+            perror(spec + 7);
+            return -1;
+        }
+        struct termios t;
+        tcgetattr(l->fd, &t);
+        cfmakeraw(&t);
+        cfsetspeed(&t, B115200);
+        tcsetattr(l->fd, TCSANOW, &t);
+        return 0;
+    }
+    if (!strncmp(spec, "udp:", 4)) {
+        char host[256];
+        snprintf(host, sizeof(host), "%s", spec + 4);
+        char* colon = strrchr(host, ':');
+        if (!colon)
+            return -1;
+        *colon = 0;
+        struct addrinfo hints = { .ai_family = AF_UNSPEC, .ai_socktype = SOCK_DGRAM }, *ai;
+        if (getaddrinfo(host, colon + 1, &hints, &ai))
+            return -1;
+        l->fd = socket(ai->ai_family, SOCK_DGRAM, 0);
+        if (l->fd >= 0 && connect(l->fd, ai->ai_addr, ai->ai_addrlen)) {
+            close(l->fd);
+            l->fd = -1;
+        }
+        freeaddrinfo(ai);
+        l->is_udp = 1;
+        return l->fd < 0 ? -1 : 0;
+    }
+    fprintf(stderr, "unknown LNB controller \"%s\"\n", spec);
+    return -1;
+}
+
+/* Sends one command line, waits for "OK" or "ERR ...". Returns 0 or -EIO. */
+static int lnb_command(struct lnb* l, const char* cmd)
+{
+    fprintf(stderr, "LNB: %s\n", cmd);
+    if (l->fd < 0)
+        return 0;
+    char line[128];
+    int n = snprintf(line, sizeof(line), "%s\n", cmd);
+    if (write(l->fd, line, n) != n)
+        return -EIO;
+    /* one reply line, 1 s timeout */
+    size_t got = 0;
+    const double deadline = now() + 1.0;
+    while (got < sizeof(line) - 1) {
+        struct pollfd p = { .fd = l->fd, .events = POLLIN };
+        int ms = (int)((deadline - now()) * 1e3);
+        if (ms <= 0 || poll(&p, 1, ms) <= 0)
+            break;
+        ssize_t r = read(l->fd, line + got, sizeof(line) - 1 - got);
+        if (r <= 0)
+            break;
+        got += r;
+        if (l->is_udp || memchr(line, '\n', got))
+            break;
+    }
+    line[got] = 0;
+    if (!strncmp(line, "OK", 2))
+        return 0;
+    fprintf(stderr, "LNB: controller answered \"%s\"\n", got ? strtok(line, "\r\n") : "nothing");
+    return -EIO;
+}
+
+/* "auto", "1/2", ... "7/8" -> enum drx_dvbs_rate, -1 if invalid */
+static int parse_dvbs_rate(const char* s)
+{
+    static const char* const names[] = { "auto", "1/2", "2/3", "3/4", "5/6", "7/8" };
+    for (int i = 0; i < 6; i++)
+        if (!strcmp(s, names[i]))
+            return i;
+    return -1;
+}
+
+/* ---- receiver settings ---------------------------------------------------- */
+
+/* Low roll-offs have slowly decaying RRC tails: keep the truncation loss
+ * small without paying for long filters where they are not needed. */
+static int rrc_delay_for(float rolloff)
+{
+    if (rolloff >= 0.2f)
+        return 10;
+    int d = (int)(2.0f / rolloff + 0.5f);
+    return d < 10 ? 10 : d;
+}
+
+struct hub;
+
+struct bridge {
+    int index; /* /dev/dvbrxN */
+    int ctl;
+    struct radio* radio;
+    struct lnb* lnb;
+    struct hub* hub; /* several adapters on one capture, or NULL */
+    drx_mt* mt;
+    int threads, rrc_delay;
+    double max_rate;
+    double symrate;
+    double ch_freq, ch_occ; /* hub: channel centre and occupied bandwidth, Hz */
+    int ch_id;              /* hub: channelizer output */
+    uint64_t last_frames, last_packets;
+    double t_frames, t_packets; /* when they last went up */
+    double t0, last_status, last_print;
+};
+
+/* ---- several adapters on one wideband capture ----------------------------- */
+
+#define MAX_BRIDGES 8
+#define HUB_USABLE 0.45 /* usable half-band, fraction of the capture rate */
+
+struct hub {
+    struct radio* radio;
+    double fs;     /* capture rate */
+    double lo;     /* capture centre, Hz */
+    int fixed_lo;  /* -f given: never retuned */
+    int streaming; /* the radio thread runs */
+    drx_chan* chan;
+    struct bridge* b[MAX_BRIDGES];
+    int n;
+};
+
+/* Radio thread: the channelizer splits the capture, each channel goes to
+ * its adapter's receiver. */
+static void hub_push(void* ctx, const float* iq, int n)
+{
+    struct hub* h = ctx;
+    drx_chan_process(h->chan, iq, n);
+}
+
+static void hub_deliver(void* ctx, const float* iq, int n)
+{
+    struct bridge* b = ctx;
+    drx_mt* mt = __atomic_load_n(&b->mt, __ATOMIC_ACQUIRE);
+    if (mt)
+        drx_mt_push(mt, iq, n, 1);
+}
+
+static int hub_active(const struct hub* h, const struct bridge* except)
+{
+    int n = 0;
+    for (int i = 0; i < h->n; i++)
+        n += h->b[i] != except && h->b[i]->mt;
+    return n;
+}
+
+static int hub_fits(const struct hub* h, double lo, double f, double occ)
+{
+    return fabs(f - lo) + occ / 2 <= HUB_USABLE * h->fs;
+}
+
+/* Chooses the capture centre for a new channel of adapter b, keeping the
+ * channels of the other adapters inside the capture; retunes if needed.
+ * Returns 0, or -1 when the channel does not fit. */
+static int hub_place(struct hub* h, struct bridge* b, double f, double occ)
+{
+    double lo = h->lo;
+    if (occ / 2 > HUB_USABLE * h->fs) {
+        fprintf(stderr, "adapter %d: %.3f MHz wide, more than the capture (%.3f Msps)\n",
+                b->index, occ / 1e6, h->fs / 1e6);
+        return -1;
+    }
+    if (h->fixed_lo) {
+        if (!hub_fits(h, lo, f, occ)) {
+            fprintf(stderr, "adapter %d: %.3f MHz is outside the capture (%.3f MHz +- %.3f)\n",
+                    b->index, f / 1e6, lo / 1e6, HUB_USABLE * h->fs / 1e6);
+            return -1;
+        }
+    } else if (!hub_active(h, b)) {
+        lo = f;
+    } else {
+        double lo_edge = f - occ / 2, hi_edge = f + occ / 2;
+        int fits = hub_fits(h, lo, f, occ);
+        for (int i = 0; i < h->n; i++) {
+            const struct bridge* o = h->b[i];
+            if (o == b || !o->mt)
+                continue;
+            if (o->ch_freq - o->ch_occ / 2 < lo_edge)
+                lo_edge = o->ch_freq - o->ch_occ / 2;
+            if (o->ch_freq + o->ch_occ / 2 > hi_edge)
+                hi_edge = o->ch_freq + o->ch_occ / 2;
+            fits = fits && hub_fits(h, lo, o->ch_freq, o->ch_occ);
+        }
+        if (hi_edge - lo_edge > 2 * HUB_USABLE * h->fs) {
+            fprintf(stderr,
+                    "adapter %d: %.3f MHz does not fit in the capture with the other adapters' "
+                    "channels (%.3f to %.3f MHz, %.3f MHz usable)\n",
+                    b->index, f / 1e6, lo_edge / 1e6, hi_edge / 1e6, 2 * HUB_USABLE * h->fs / 1e6);
+            return -1;
+        }
+        if (!fits)
+            lo = (lo_edge + hi_edge) / 2;
+    }
+    b->ch_freq = f;
+    b->ch_occ = occ;
+    if (lo != h->lo || !h->streaming) {
+        if (h->streaming)
+            radio_retune(h->radio, lo);
+        for (int i = 0; i < h->n; i++) {
+            struct bridge* o = h->b[i];
+            if (o != b && o->mt)
+                drx_chan_set_offset(h->chan, o->ch_id, o->ch_freq - lo);
+        }
+        if (lo != h->lo)
+            fprintf(stderr, "capture centre %.3f MHz (%d other channel%s)\n", lo / 1e6,
+                    hub_active(h, b), hub_active(h, b) > 1 ? "s" : "");
+        h->lo = lo;
+    }
+    return 0;
+}
+
+static void hub_attach(struct hub* h, struct bridge* b, drx_mt* mt)
+{
+    __atomic_store_n(&b->mt, mt, __ATOMIC_RELEASE);
+    if (!h->streaming) {
+        radio_retune(h->radio, h->lo);
+        h->radio->sink = hub_push;
+        h->radio->sink_ctx = h;
+        radio_start(h->radio, NULL);
+        h->streaming = 1;
+    }
+}
+
+static void hub_detach(struct hub* h, struct bridge* b)
+{
+    /* once removed, the channelizer no longer calls hub_deliver for b */
+    drx_chan_remove(h->chan, b->ch_id);
+    b->ch_id = -1;
+    drx_mt* mt = b->mt;
+    b->mt = NULL;
+    if (h->streaming && !hub_active(h, NULL)) {
+        radio_stop(h->radio);
+        h->streaming = 0;
+    }
+    drx_mt_free(mt);
+}
+
+/* ---- DVB bridge ----------------------------------------------------------- */
+
+static void on_ts_bridge(void* ctx, int isi, const uint8_t* ts, int len)
+{
+    (void)isi;
+    struct bridge* b = ctx;
+    if (write(b->ctl, ts, len) != len)
+        perror("write to /dev/dvbrx");
+}
+
+static float rolloff_of(const struct dvbrx_tune* t)
+{
+    if (t->delivery_system == SYS_DVBS)
+        return 0.35f; /* fixed by EN 300 421; the cache may hold a DVB-S2 value */
+    if (t->delivery_system == SYS_DVBC_ANNEX_A)
+        return 0.15f; /* EN 300 429 */
+    switch (t->rolloff) {
+    case ROLLOFF_35: return 0.35f;
+    case ROLLOFF_25: return 0.25f;
+    case ROLLOFF_20: return 0.20f;
+    case ROLLOFF_15: return 0.15f;
+    case ROLLOFF_10: return 0.10f;
+    case ROLLOFF_5: return 0.05f;
+    default: return t->delivery_system == SYS_DVBS ? 0.35f : 0.20f;
+    }
+}
+
+static int is_ofdm(const struct dvbrx_tune* t)
+{
+    return t->delivery_system == SYS_DVBT || t->delivery_system == SYS_DVBT2;
+}
+
+/* What a channel needs: the sample rate it is best received at, the least
+ * it can do with, and its occupied bandwidth (Hz). */
+struct chan_need {
+    double want, min, occ;
+};
+
+static struct chan_need need_of(const struct dvbrx_tune* t)
+{
+    struct chan_need n;
+    if (is_ofdm(t)) {
+        const double bw = t->bandwidth_hz ? t->bandwidth_hz : 8e6, elem = bw * 8 / 7;
+        n.want = elem * 1.12;
+        n.min = elem;
+        n.occ = 0.98 * bw; /* DVB-T2 extended carriers: 7.77 MHz in 8 MHz */
+    } else {
+        n.want = 2.0 * t->symbol_rate;
+        n.min = 1.5 * t->symbol_rate;
+        n.occ = t->symbol_rate * (1 + rolloff_of(t));
+    }
+    return n;
+}
+
+/* enum fe_modulation -> enum drx_qam */
+static int qam_of(uint32_t modulation)
+{
+    switch (modulation) {
+    case QAM_16: return DRX_QAM_16;
+    case QAM_32: return DRX_QAM_32;
+    case QAM_64: return DRX_QAM_64;
+    case QAM_128: return DRX_QAM_128;
+    case QAM_256: return DRX_QAM_256;
+    default: return DRX_QAM_AUTO;
+    }
+}
+
+/* Receiver settings for a tuning request, the channel coming at rate. */
+static void rx_cfg_for(const struct bridge* b, const struct dvbrx_tune* t, double rate,
+                       drx_mt_cfg* cfg)
+{
+    if (is_ofdm(t)) {
+        drx_mt_cfg_default(cfg, 2, 0.2f);
+        cfg->dvbt = t->delivery_system == SYS_DVBT;
+        cfg->dvbt2 = t->delivery_system == SYS_DVBT2;
+        cfg->sample_rate = rate;
+        cfg->bandwidth = t->bandwidth_hz ? t->bandwidth_hz : 8e6;
+        cfg->rx.isi = t->stream_id >= 0 ? t->stream_id : DRX_ISI_FIRST; /* T2: the PLP */
+        return;
+    }
+    const float rolloff = rolloff_of(t);
+    drx_mt_cfg_default(cfg, (float)(rate / t->symbol_rate), rolloff);
+    cfg->ldpc_threads = b->threads;
+    cfg->fe.rrc_delay = b->rrc_delay > 0 ? b->rrc_delay : rrc_delay_for(rolloff);
+    cfg->rx.gold_code = (int)t->scrambling_index;
+    /* Applications commonly send 0 when no stream was asked for: like no
+     * filter, take the first stream (a single-stream signal is ISI 0). */
+    cfg->rx.isi = t->stream_id > 0 ? t->stream_id : DRX_ISI_FIRST;
+    if (t->delivery_system == SYS_DVBS) {
+        cfg->dvbs = 1;
+        switch (t->fec_inner) {
+        case FEC_1_2: cfg->dvbs_rate = DRX_DVBS_1_2; break;
+        case FEC_2_3: cfg->dvbs_rate = DRX_DVBS_2_3; break;
+        case FEC_3_4: cfg->dvbs_rate = DRX_DVBS_3_4; break;
+        case FEC_5_6: cfg->dvbs_rate = DRX_DVBS_5_6; break;
+        case FEC_7_8: cfg->dvbs_rate = DRX_DVBS_7_8; break;
+        default: cfg->dvbs_rate = DRX_DVBS_AUTO; break;
+        }
+    }
+    if (t->delivery_system == SYS_DVBC_ANNEX_A) {
+        cfg->dvbc = 1;
+        cfg->dvbc_qam = qam_of(t->modulation);
+    }
+}
+
+static void bridge_stop_rx(struct bridge* b)
+{
+    if (b->hub) {
+        hub_detach(b->hub, b);
+        return;
+    }
+    radio_stop(b->radio);
+    if (b->mt) {
+        drx_mt_free(b->mt);
+        b->mt = NULL;
+    }
+}
+
+/* Single-channel mode: the SDR rate follows the channel. Sample rate for
+ * an OFDM channel: a little above the elementary rate, as the device
+ * allows; for single-carrier ones about 2 samples per symbol. */
+static double single_rate(struct bridge* b, const struct dvbrx_tune* t, const struct chan_need* n)
+{
+    const double freq = t->frequency_khz * 1e3;
+    double want = n->want > b->max_rate ? b->max_rate : n->want;
+    if (want < n->min)
+        return -1;
+    double rate = radio_configure(b->radio, freq, want);
+    if (is_ofdm(t) && rate > 0 && rate < n->min) /* rounded down below what is needed */
+        rate = radio_configure(b->radio, freq, n->min * 1.3);
+    return rate >= n->min ? rate : -1;
+}
+
+static void log_tune(const struct bridge* b, const struct dvbrx_tune* t)
+{
+    char tag[16] = "";
+    if (b->hub)
+        snprintf(tag, sizeof(tag), "adapter %d: ", b->index);
+    switch (t->delivery_system) {
+    case SYS_DVBT2:
+        fprintf(stderr, "%stune: DVB-T2, %u kHz, bandwidth %.1f MHz, PLP %d\n", tag,
+                t->frequency_khz, (t->bandwidth_hz ? t->bandwidth_hz : 8e6) / 1e6, t->stream_id);
+        break;
+    case SYS_DVBT:
+        fprintf(stderr, "%stune: DVB-T, %u kHz, bandwidth %.0f MHz\n", tag, t->frequency_khz,
+                (t->bandwidth_hz ? t->bandwidth_hz : 8e6) / 1e6);
+        break;
+    case SYS_DVBS:
+        fprintf(stderr, "%stune: DVB-S, %u kHz, %u sym/s\n", tag, t->frequency_khz, t->symbol_rate);
+        break;
+    case SYS_DVBC_ANNEX_A:
+        fprintf(stderr, "%stune: DVB-C, %u kHz, %u sym/s, QAM %d\n", tag, t->frequency_khz,
+                t->symbol_rate, qam_of(t->modulation));
+        break;
+    default:
+        fprintf(stderr, "%stune: DVB-S2, %u kHz, %u sym/s, roll-off %.2f, ISI %d, gold %u\n", tag,
+                t->frequency_khz, t->symbol_rate, rolloff_of(t), t->stream_id, t->scrambling_index);
+    }
+}
+
+static void bridge_tune(struct bridge* b, const struct dvbrx_tune* t)
+{
+    bridge_stop_rx(b);
+    if (t->delivery_system != SYS_DVBS && t->delivery_system != SYS_DVBS2 &&
+        t->delivery_system != SYS_DVBC_ANNEX_A && t->delivery_system != SYS_DVBT &&
+        t->delivery_system != SYS_DVBT2) {
+        fprintf(stderr, "tune: delivery system %u not supported yet\n", t->delivery_system);
+        return;
+    }
+    log_tune(b, t);
+    if (!is_ofdm(t) && t->symbol_rate == 0) {
+        fprintf(stderr, "tune: symbol rate out of range\n");
+        return;
+    }
+    const struct chan_need need = need_of(t);
+    const double freq = t->frequency_khz * 1e3;
+    double rate;
+    drx_mt_cfg cfg;
+    if (b->hub) {
+        struct hub* h = b->hub;
+        if (h->fs < need.min) {
+            fprintf(stderr, "adapter %d: needs %.3f Msps, more than the capture (%.3f Msps)\n",
+                    b->index, need.min / 1e6, h->fs / 1e6);
+            return;
+        }
+        if (hub_place(h, b, freq, need.occ))
+            return;
+        /* the channel's samples are dropped until its receiver is there */
+        b->ch_id = drx_chan_add(h->chan, freq - h->lo, need.occ, need.want, &rate, hub_deliver, b);
+        if (b->ch_id < 0 || rate < need.min) {
+            fprintf(stderr, "adapter %d: channel does not fit in the capture\n", b->index);
+            drx_chan_remove(h->chan, b->ch_id);
+            b->ch_id = -1;
+            return;
+        }
+        rx_cfg_for(b, t, rate, &cfg);
+        fprintf(stderr, "adapter %d: channel at %+.3f MHz in the capture, %.3f Msps\n", b->index,
+                (freq - h->lo) / 1e6, rate / 1e6);
+    } else {
+        rate = single_rate(b, t, &need);
+        if (rate <= 0) {
+            fprintf(stderr, "tune: no usable sample rate (%.3f Msps needed)\n", need.min / 1e6);
+            return;
+        }
+        rx_cfg_for(b, t, rate, &cfg);
+    }
+    drx_mt* mt = drx_mt_new(&cfg, on_ts_bridge, b);
+    if (!mt) {
+        fprintf(stderr, "tune: receiver setup failed\n");
+        if (b->hub) {
+            drx_chan_remove(b->hub->chan, b->ch_id);
+            b->ch_id = -1;
+        }
+        return;
+    }
+    /* statistics: OFDM frequency in cycles per input sample, else per symbol */
+    b->symrate = is_ofdm(t) ? rate : t->symbol_rate;
+    b->last_frames = b->last_packets = 0;
+    b->t_frames = b->t_packets = 0;
+    b->t0 = now();
+    if (b->hub) {
+        hub_attach(b->hub, b, mt);
+    } else {
+        b->mt = mt;
+        if (radio_start(b->radio, b->mt))
+            bridge_stop_rx(b);
+    }
+}
+
+static int lnb_event(struct bridge* b, const struct dvbrx_event* ev)
+{
+    struct lnb* l = b->lnb;
+    /* Adapters sharing the LNB: a command that would change what another
+     * adapter receives is refused while that adapter is in use; repeating
+     * the current state is accepted (and not sent again). */
+    const int shared = b->hub && hub_active(b->hub, b);
+    char cmd[64];
+    switch (ev->type) {
+    case DVBRX_EV_VOLTAGE:
+        if (shared && (ev->voltage == (uint32_t)l->voltage || ev->voltage == SEC_VOLTAGE_OFF))
+            return 0;
+        if (shared)
+            return -EBUSY;
+        l->voltage = (int)ev->voltage;
+        snprintf(cmd, sizeof(cmd), "VOLT %s",
+                 ev->voltage == SEC_VOLTAGE_13   ? "13"
+                 : ev->voltage == SEC_VOLTAGE_18 ? "18"
+                                                 : "OFF");
+        break;
+    case DVBRX_EV_TONE:
+        if (shared)
+            return ev->tone == (uint32_t)l->tone ? 0 : -EBUSY;
+        l->tone = (int)ev->tone;
+        snprintf(cmd, sizeof(cmd), "TONE %s", ev->tone == SEC_TONE_ON ? "ON" : "OFF");
+        break;
+    case DVBRX_EV_BURST:
+        if (shared)
+            return -EBUSY;
+        snprintf(cmd, sizeof(cmd), "BURST %s", ev->burst == SEC_MINI_A ? "A" : "B");
+        break;
+    case DVBRX_EV_DISEQC: {
+        const int len = ev->diseqc.len < 6 ? ev->diseqc.len : 6;
+        if (shared)
+            return len == l->diseqc_len && !memcmp(ev->diseqc.msg, l->diseqc, len) ? 0 : -EBUSY;
+        l->diseqc_len = len;
+        memcpy(l->diseqc, ev->diseqc.msg, len);
+        int n = snprintf(cmd, sizeof(cmd), "DISEQC");
+        for (int i = 0; i < len; i++)
+            n += snprintf(cmd + n, sizeof(cmd) - n, " %02x", ev->diseqc.msg[i]);
+        break;
+    }
+    default:
+        return -EINVAL;
+    }
+    return lnb_command(l, cmd);
+}
+
+#define LOCK_HOLD 1.0 /* seconds */
+
+static void bridge_status(struct bridge* b)
+{
+    struct dvbrx_status st = { .strength = INT_MIN };
+    if (b->mt) {
+        drx_rx_stats s;
+        drx_mt_get_stats(b->mt, &s);
+        /* Held for a while: short signal dropouts make the PL sync lose
+         * and regain lock, which must not look like a lost transponder
+         * (applications retune then). */
+        const double t = now();
+        if (s.plframes > b->last_frames)
+            b->t_frames = t;
+        if (s.ts_packets > b->last_packets)
+            b->t_packets = t;
+        b->last_frames = s.plframes;
+        b->last_packets = s.ts_packets;
+        if (t - b->t_frames < LOCK_HOLD)
+            st.status = FE_HAS_SIGNAL | FE_HAS_CARRIER | FE_HAS_SYNC;
+        if (st.status && t - b->t_packets < LOCK_HOLD)
+            st.status |= FE_HAS_VITERBI | FE_HAS_LOCK;
+        st.cnr = (int32_t)(s.snr_db * 1000);
+        st.block_count = s.plframes;
+        st.block_errors = s.bch_failed;
+    }
+    if (ioctl(b->ctl, DVBRX_IOC_STATUS, &st))
+        perror("DVBRX_IOC_STATUS");
+}
+
+static void bridge_event(struct bridge* b)
+{
+    struct dvbrx_event ev;
+    if (read(b->ctl, &ev, sizeof(ev)) != sizeof(ev))
+        return;
+    if (ev.type == DVBRX_EV_TUNE) {
+        bridge_tune(b, &ev.tune);
+    } else if (ev.type == DVBRX_EV_SLEEP) {
+        if (b->hub)
+            fprintf(stderr, "adapter %d: ", b->index);
+        fprintf(stderr, "frontend closed: stopping\n");
+        bridge_stop_rx(b);
+    } else {
+        struct dvbrx_reply r = { .seq = ev.seq, .result = lnb_event(b, &ev) };
+        if (ioctl(b->ctl, DVBRX_IOC_REPLY, &r))
+            perror("DVBRX_IOC_REPLY");
+    }
+}
+
+/* Serves n adapters (one, or several sharing a hub) from this thread. */
+static int run_bridges(struct bridge* b, int n)
+{
+    struct pollfd p[MAX_BRIDGES];
+    for (int i = 0; i < n; i++) {
+        char path[32];
+        snprintf(path, sizeof(path), "/dev/dvbrx%d", b[i].index);
+        b[i].ctl = open(path, O_RDWR);
+        if (b[i].ctl < 0) {
+            perror(path);
+            fprintf(stderr, "is the dvbrx module loaded (with adapters=%d or more)?\n",
+                    b[i].index + 1);
+            while (i--)
+                close(b[i].ctl);
+            return 1;
+        }
+        fprintf(stderr, "bridge: serving /dev/dvb through %s\n", path);
+        b[i].last_print = b[i].t0 = now();
+    }
+    while (!stop) {
+        for (int i = 0; i < n; i++)
+            p[i] = (struct pollfd){ .fd = b[i].ctl, .events = POLLIN };
+        if (poll(p, n, 100) > 0)
+            for (int i = 0; i < n; i++)
+                if (p[i].revents & POLLIN)
+                    bridge_event(&b[i]);
+        for (int i = 0; i < n; i++) {
+            if (now() - b[i].last_status >= 0.2) {
+                bridge_status(&b[i]);
+                b[i].last_status = now();
+            }
+            if (b[i].mt && now() - b[i].last_print >= 2.0) {
+                char tag[16] = "";
+                if (b[i].hub)
+                    snprintf(tag, sizeof(tag), "a%d ", b[i].index);
+                print_stats(b[i].mt, b[i].radio, b[i].t0, b[i].symrate, tag);
+                b[i].last_print = now();
+            }
+        }
+    }
+    for (int i = 0; i < n; i++) {
+        bridge_stop_rx(&b[i]);
+        close(b[i].ctl);
+    }
+    return 0;
+}
+
+/* ---- main ----------------------------------------------------------------- */
+
+/* standalone -x: the channelizer between the source and the receiver */
+struct standalone_chan {
+    drx_mt* mt;
+    int nonblock;
+};
+
+static void standalone_deliver(void* ctx, const float* iq, int n)
+{
+    struct standalone_chan* sc = ctx;
+    if (sc->mt)
+        drx_mt_push(sc->mt, iq, n, sc->nonblock);
+}
+
+static void drx_chan_process_cb(void* ctx, const float* iq, int n)
+{
+    drx_chan_process(ctx, iq, n);
+}
+
+/* ---- standalone, several channels (-m) ------------------------------------ */
+
+#define MAX_MULTI 8
+
+/* "f=HZ,sys=t2,bw=8,o=DEST" -> tuning request and output; 0 or -1 */
+static int parse_multi(const char* spec, struct dvbrx_tune* t, double* freq, char* dest,
+                       size_t destlen)
+{
+    memset(t, 0, sizeof(*t));
+    t->delivery_system = SYS_DVBS2;
+    t->stream_id = -1;
+    t->rolloff = ROLLOFF_20;
+    t->bandwidth_hz = 8000000;
+    *freq = 0;
+    dest[0] = 0;
+    char buf[256];
+    snprintf(buf, sizeof(buf), "%s", spec);
+    for (char *save, *kv = strtok_r(buf, ",", &save); kv; kv = strtok_r(NULL, ",", &save)) {
+        char* v = strchr(kv, '=');
+        if (!v)
+            return -1;
+        *v++ = 0;
+        if (!strcmp(kv, "f")) {
+            *freq = atof(v);
+        } else if (!strcmp(kv, "sys")) {
+            if (!strcmp(v, "s")) t->delivery_system = SYS_DVBS;
+            else if (!strcmp(v, "s2")) t->delivery_system = SYS_DVBS2;
+            else if (!strcmp(v, "c")) t->delivery_system = SYS_DVBC_ANNEX_A;
+            else if (!strcmp(v, "t")) t->delivery_system = SYS_DVBT;
+            else if (!strcmp(v, "t2")) t->delivery_system = SYS_DVBT2;
+            else return -1;
+        } else if (!strcmp(kv, "sr")) {
+            t->symbol_rate = (uint32_t)atof(v);
+        } else if (!strcmp(kv, "bw")) {
+            t->bandwidth_hz = (uint32_t)(atof(v) * 1e6);
+        } else if (!strcmp(kv, "ro")) {
+            const double r = atof(v);
+            t->rolloff = r >= 0.3 ? ROLLOFF_35 : r >= 0.22 ? ROLLOFF_25 : r >= 0.17 ? ROLLOFF_20
+                         : r >= 0.12 ? ROLLOFF_15 : r >= 0.07 ? ROLLOFF_10 : ROLLOFF_5;
+        } else if (!strcmp(kv, "qam")) {
+            const int q = atoi(v);
+            t->modulation = q == 16 ? QAM_16 : q == 32 ? QAM_32 : q == 64 ? QAM_64
+                            : q == 128 ? QAM_128 : q == 256 ? QAM_256 : QAM_AUTO;
+        } else if (!strcmp(kv, "fec")) {
+            const int r = parse_dvbs_rate(v);
+            static const uint32_t fecs[] = { FEC_AUTO, FEC_1_2, FEC_2_3, FEC_3_4, FEC_5_6, FEC_7_8 };
+            if (r < 0)
+                return -1;
+            t->fec_inner = fecs[r];
+        } else if (!strcmp(kv, "isi") || !strcmp(kv, "plp")) {
+            t->stream_id = atoi(v);
+        } else if (!strcmp(kv, "gold")) {
+            t->scrambling_index = (uint32_t)drx_pls_parse(v);
+        } else if (!strcmp(kv, "o")) {
+            snprintf(dest, destlen, "%s", v);
+        } else {
+            return -1;
+        }
+    }
+    if (*freq <= 0 || !dest[0] || (!is_ofdm(t) && !t->symbol_rate))
+        return -1;
+    t->frequency_khz = (uint32_t)(*freq / 1e3);
+    return 0;
+}
+
+/* Several channels of one capture (rate -S, centre -f or the middle of the
+ * channels), each to its own output. */
+static int run_multi(struct radio* radio, char** specs, int n, double centre, double rate,
+                     int threads, int rrc_delay)
+{
+    struct dvbrx_tune t[MAX_MULTI];
+    double f[MAX_MULTI], symrate[MAX_MULTI];
+    struct output out[MAX_MULTI];
+    struct standalone_chan sc[MAX_MULTI];
+    drx_mt* mt[MAX_MULTI] = { 0 };
+    char dest[MAX_MULTI][256];
+    double lo = 1e300, hi = -1e300;
+    for (int i = 0; i < n; i++) {
+        if (parse_multi(specs[i], &t[i], &f[i], dest[i], sizeof(dest[i]))) {
+            fprintf(stderr, "-m %s: expected f=HZ,sys=s|s2|c|t|t2,[sr=,bw=,ro=,qam=,fec=,isi=,"
+                            "plp=,gold=,]o=DEST\n", specs[i]);
+            return 2;
+        }
+        const struct chan_need need = need_of(&t[i]);
+        lo = fmin(lo, f[i] - need.occ / 2);
+        hi = fmax(hi, f[i] + need.occ / 2);
+    }
+    if (centre <= 0)
+        centre = (lo + hi) / 2;
+    if (rate <= 0)
+        rate = 30.72e6;
+    if ((rate = radio_configure(radio, centre, rate)) <= 0)
+        return 1;
+    drx_chan* chan = drx_chan_new(rate);
+    if (!chan)
+        return 1;
+    const struct bridge settings = { .threads = threads, .rrc_delay = rrc_delay };
+    for (int i = 0; i < n; i++) {
+        const struct chan_need need = need_of(&t[i]);
+        double crate = 0;
+        sc[i] = (struct standalone_chan){ .nonblock = radio->file_realtime || !radio->file };
+        if (output_open(&out[i], dest[i], 0)) {
+            fprintf(stderr, "cannot open output %s\n", dest[i]);
+            return 1;
+        }
+        if (drx_chan_add(chan, f[i] - centre, need.occ, need.want, &crate, standalone_deliver,
+                         &sc[i]) < 0 || crate < need.min) {
+            fprintf(stderr, "channel %d (%.3f MHz) does not fit in the capture (%.3f MHz, %.3f "
+                            "Msps)\n", i, f[i] / 1e6, centre / 1e6, rate / 1e6);
+            return 2;
+        }
+        drx_mt_cfg cfg;
+        rx_cfg_for(&settings, &t[i], crate, &cfg);
+        if (!(mt[i] = drx_mt_new(&cfg, on_ts_output, &out[i]))) {
+            fprintf(stderr, "channel %d: receiver setup failed\n", i);
+            return 1;
+        }
+        sc[i].mt = mt[i];
+        symrate[i] = is_ofdm(&t[i]) ? crate : t[i].symbol_rate;
+        fprintf(stderr, "c%d: %.3f MHz (%+.3f in the capture), %.3f Msps -> %s\n", i, f[i] / 1e6,
+                (f[i] - centre) / 1e6, crate / 1e6, dest[i]);
+    }
+    radio->sink = drx_chan_process_cb;
+    radio->sink_ctx = chan;
+    radio_start(radio, NULL);
+    const double t0 = now();
+    double last = t0;
+    while (!stop && !(radio->file && radio->eof)) {
+        usleep(20000);
+        if (now() - last >= 1.0) {
+            for (int i = 0; i < n; i++) {
+                char tag[8];
+                snprintf(tag, sizeof(tag), "c%d ", i);
+                print_stats(mt[i], radio, t0, symrate[i], tag);
+            }
+            last = now();
+        }
+    }
+    radio_close(radio);
+    drx_chan_free(chan);
+    for (int i = 0; i < n; i++) {
+        char tag[8];
+        snprintf(tag, sizeof(tag), "c%d ", i);
+        drx_mt_finish(mt[i]);
+        print_stats(mt[i], radio, t0, symrate[i], tag);
+        drx_mt_free(mt[i]);
+        if (out[i].file)
+            fclose(out[i].file);
+    }
+    return 0;
+}
+
+static void usage(const char* prog)
+{
+    fprintf(stderr,
+            "usage: %s (-u UHD_ARGS -f FREQ | -F FILE) -s SYMRATE [-S RATE] [-G GAIN] [-A ANT] "
+            "[-M MCR] [-r ROLLOFF] [-D SYMBOLS] [-g GOLD] [-i ISI] [-l DVBS_RATE] [-c QAM] [-T MHZ] [-2 MHZ] [-o DEST] "
+            "[-t THREADS] [-R]\n"
+            "       %s -d N (-u UHD_ARGS | -F FILE) [-S MAX_RATE] [-G GAIN] [-A ANT] [-M MCR] "
+            "[-L LNB] [-t THREADS]\n",
+            prog, prog);
+}
+
+int main(int argc, char** argv)
+{
+    const char *dest = "-", *lnb_spec = "none";
+    struct radio radio = { .gain = 40 };
+    double freq = 0, rate = 0, symrate = 0;
+    float rolloff = 0.2f;
+    int threads = 2, realtime = 0, gold = 0, isi = DRX_ISI_ALL, rrc_delay = 0, bridge = -1;
+    int dvbs_rate = -1; /* -1: DVB-S2 */
+    int qam = -1;       /* -1: not DVB-C */
+    double dvbt_bw = 0;
+    int dvbt2 = 0;
+    int nbridges = 1;
+    double wide_rate = 0, offset = NAN;
+    char* multi[MAX_MULTI];
+    int nmulti = 0;
+    int opt;
+    while ((opt = getopt(argc, argv, "u:F:f:S:G:A:M:s:r:D:g:i:o:t:Rd:L:l:c:T:2:n:W:x:m:")) != -1) {
+        switch (opt) {
+        case 'u': radio.uhd_args = optarg; break;
+        case 'F': radio.file = optarg; break;
+        case 'f': freq = atof(optarg); break;
+        case 'S': rate = atof(optarg); break;
+        case 'G':
+            radio.gain_auto = !strcmp(optarg, "auto");
+            radio.gain = radio.gain_auto ? 30 : atof(optarg);
+            break;
+        case 'A': radio.antenna = optarg; break;
+        case 'M': radio.mcr = atof(optarg); break;
+        case 's': symrate = atof(optarg); break;
+        case 'r': rolloff = (float)atof(optarg); break;
+        case 'D': rrc_delay = atoi(optarg); break;
+        case 'g': gold = drx_pls_parse(optarg); break;
+        case 'i': isi = atoi(optarg); break;
+        case 'o': dest = optarg; break;
+        case 't': threads = atoi(optarg); break;
+        case 'R': realtime = 1; break;
+        case 'd': bridge = atoi(optarg); break;
+        case 'L': lnb_spec = optarg; break;
+        case 'n': nbridges = atoi(optarg); break;
+        case 'W': wide_rate = atof(optarg); break;
+        case 'x': offset = atof(optarg); break;
+        case 'm':
+            if (nmulti == MAX_MULTI) {
+                fprintf(stderr, "-m: at most %d channels\n", MAX_MULTI);
+                return 2;
+            }
+            multi[nmulti++] = optarg;
+            break;
+        case 'l':
+            if ((dvbs_rate = parse_dvbs_rate(optarg)) < 0) {
+                usage(argv[0]);
+                return 2;
+            }
+            break;
+        case 'T': dvbt_bw = atof(optarg) * 1e6; break;
+        case '2':
+            dvbt_bw = atof(optarg) * 1e6;
+            dvbt2 = 1;
+            break;
+        case 'c':
+            qam = strcmp(optarg, "auto") ? atoi(optarg) : DRX_QAM_AUTO;
+            rolloff = 0.15f;
+            break;
+        default: usage(argv[0]); return 2;
+        }
+    }
+    if (!radio.uhd_args && !radio.file) {
+        usage(argv[0]);
+        return 2;
+    }
+    if (gold < 0) {
+        fprintf(stderr, "invalid PLS code\n");
+        return 2;
+    }
+    signal(SIGINT, on_signal);
+    signal(SIGTERM, on_signal);
+
+    if (bridge >= 0) {
+        if (nbridges < 1 || nbridges > MAX_BRIDGES) {
+            fprintf(stderr, "-n: 1 to %d adapters\n", MAX_BRIDGES);
+            return 2;
+        }
+        struct lnb lnb;
+        struct hub hub = { .radio = &radio };
+        struct bridge b[MAX_BRIDGES];
+        radio.file_loop = radio.file_realtime = 1;
+        if (lnb_open(&lnb, lnb_spec))
+            return 1;
+        if (nbridges > 1 || wide_rate > 0) {
+            /* one capture for all the adapters, at a fixed rate; the centre
+             * follows the channels in use, or stays at -f */
+            if (wide_rate <= 0)
+                wide_rate = 30.72e6;
+            hub.fixed_lo = freq > 0;
+            hub.fs = radio_configure(&radio, freq > 0 ? freq : 1e9, wide_rate);
+            if (hub.fs <= 0)
+                return 1;
+            hub.lo = radio.freq;
+            hub.n = nbridges;
+            if (!(hub.chan = drx_chan_new(hub.fs)))
+                return 1;
+            fprintf(stderr, "%d adapters on one %.3f Msps capture%s\n", nbridges, hub.fs / 1e6,
+                    hub.fixed_lo ? " (fixed centre)" : "");
+        }
+        for (int i = 0; i < nbridges; i++) {
+            b[i] = (struct bridge){ .index = bridge + i, .radio = &radio, .lnb = &lnb,
+                                    .hub = hub.n ? &hub : NULL, .threads = threads,
+                                    .rrc_delay = rrc_delay, .max_rate = rate > 0 ? rate : 56e6,
+                                    .ch_id = -1 };
+            hub.b[i] = &b[i];
+        }
+        int ret = run_bridges(b, nbridges);
+        radio_close(&radio);
+        drx_chan_free(hub.chan);
+        return ret;
+    }
+
+    if (nmulti) {
+        radio.file_loop = radio.file_realtime = realtime;
+        return run_multi(&radio, multi, nmulti, freq, rate, threads, rrc_delay);
+    }
+    if (dvbt_bw > 0)
+        symrate = dvbt_bw * 8 / 7; /* the elementary rate, for the statistics */
+    if (symrate <= 0) {
+        usage(argv[0]);
+        return 2;
+    }
+    if (rate <= 0)
+        rate = dvbt_bw > 0 ? symrate * 1.12 : 2 * symrate;
+    struct output out;
+    if (output_open(&out, dest, isi == DRX_ISI_ALL)) {
+        fprintf(stderr, "cannot open output %s\n", dest);
+        return 1;
+    }
+    radio.file_loop = radio.file_realtime = realtime;
+    if ((rate = radio_configure(&radio, freq, rate)) <= 0)
+        return 1;
+    /* -x: -S is the rate of a wide capture, the channel is at -x Hz in it */
+    struct standalone_chan sc = { .nonblock = realtime || !radio.file };
+    drx_chan* chan = NULL;
+    if (!isnan(offset)) {
+        const double occ = dvbt_bw > 0 ? 0.98 * dvbt_bw : symrate * (1 + rolloff);
+        const double want = dvbt_bw > 0 ? symrate * 1.12 : 2 * symrate;
+        const double wide = rate;
+        chan = drx_chan_new(wide);
+        if (!chan || drx_chan_add(chan, offset, occ, want, &rate, standalone_deliver, &sc) < 0 ||
+            rate < (dvbt_bw > 0 ? symrate : 1.5 * symrate)) {
+            fprintf(stderr, "the channel does not fit in the capture\n");
+            return 2;
+        }
+        fprintf(stderr, "channel at %+.3f MHz, %.3f Msps\n", offset / 1e6, rate / 1e6);
+        radio.sink = drx_chan_process_cb;
+        radio.sink_ctx = chan;
+    }
+    drx_mt_cfg cfg;
+    drx_mt_cfg_default(&cfg, (float)(rate / symrate), rolloff);
+    cfg.fe.rrc_delay = rrc_delay > 0 ? rrc_delay : rrc_delay_for(rolloff);
+    cfg.rx.gold_code = gold;
+    cfg.rx.isi = isi;
+    cfg.ldpc_threads = threads;
+    if (dvbs_rate >= 0) {
+        cfg.dvbs = 1;
+        cfg.dvbs_rate = dvbs_rate;
+    }
+    if (qam >= 0) {
+        cfg.dvbc = 1;
+        cfg.dvbc_qam = qam;
+    }
+    if (dvbt_bw > 0) {
+        cfg.dvbt = !dvbt2;
+        cfg.dvbt2 = dvbt2;
+        cfg.sample_rate = rate;
+        cfg.bandwidth = dvbt_bw;
+        if (dvbt2 && isi == DRX_ISI_ALL)
+            cfg.rx.isi = DRX_ISI_FIRST;
+    }
+    drx_mt* mt = drx_mt_new(&cfg, on_ts_output, &out);
+    sc.mt = mt;
+    if (!mt) {
+        fprintf(stderr, "receiver setup failed (sps %.3f)\n", rate / symrate);
+        return 1;
+    }
+    if (radio_start(&radio, mt)) {
+        drx_mt_free(mt);
+        return 1;
+    }
+    const double t0 = now();
+    double last = t0;
+    while (!stop && !(radio.file && radio.eof)) {
+        usleep(20000);
+        if (now() - last >= 1.0) {
+            print_stats(mt, &radio, t0, dvbt_bw > 0 ? rate : symrate, "");
+            last = now();
+        }
+    }
+    radio_close(&radio);
+    drx_chan_free(chan);
+    drx_mt_finish(mt);
+    print_stats(mt, &radio, t0, dvbt_bw > 0 ? rate : symrate, "");
+    drx_mt_free(mt);
+    if (out.file)
+        fclose(out.file);
+    return 0;
+}

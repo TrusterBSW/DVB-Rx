@@ -1,0 +1,8 @@
+# /etc/dvbrxd/N.conf: options of dvbrx -d N (see dvbrx -h)
+#
+# USRP B210, LNB controller on the ESP32 over USB serial, 3 LDPC threads:
+#DVBRXD_ARGS="-u type=b200 -G 40 -L serial:/dev/ttyACM0 -t 3"
+#
+# Simulated radio: an IQ file replayed in a loop at the sample rate asked
+# by the tuning request (2 samples per symbol):
+DVBRXD_ARGS="-F /var/lib/dvbrxd/sim.fc32 -t 2"

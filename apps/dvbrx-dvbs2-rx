@@ -1,0 +1,103 @@
+#!/usr/bin/env python3
+"""gr-dvbs2rx's dvbs2-rx application with the libdvbrx front-end.
+
+Same command line as dvbs2-rx. The AGC and symbol synchroniser of the
+original flowgraph are replaced by dvbrx.gr_blocks.frontend_cc, which does
+matched filtering, timing recovery and AGC. Requires an even integer --sps
+(otherwise dvbs2-rx falls back to its in-tree synchroniser).
+
+Buffer sizes are enlarged and the LDPC -> demapper LLR feedback is dropped:
+with that feedback the demapper runs ahead of the decoder, its SNR estimate
+turns NaN and the LDPC decoder then runs to the iteration limit on every
+batch. Set DVBRX_LLR_FEEDBACK=1 to keep it.
+"""
+import importlib.machinery
+import importlib.util
+import os
+import shutil
+import sys
+import types
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "..", "python"))
+from gnuradio import blocks, gr  # noqa: E402
+from dvbrx.gr_blocks import frontend_cc  # noqa: E402
+
+path = shutil.which("dvbs2-rx")
+loader = importlib.machinery.SourceFileLoader("dvbs2_rx_app", path)
+app = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+loader.exec_module(app)
+
+
+class _Proxy(types.SimpleNamespace):
+    """Module stand-in: overrides some attributes, forwards the rest."""
+
+    def __init__(self, module, **overrides):
+        super().__init__(**overrides)
+        self._module = module
+
+    def __getattr__(self, name):
+        return getattr(self._module, name)
+
+
+# Python blocks must outlive the flowgraph: dvbs2-rx only holds them in local
+# variables, and GNU Radio would otherwise drop the last reference from one of
+# its threads without the GIL.
+_keep = []
+
+
+def _symbol_sync(sps, loop_bw, damping, rolloff, rrc_delay, nfilts, interp_method):
+    blk = frontend_cc(sps, rolloff, min(int(rrc_delay), 10), loop_bw, damping)
+    blk.set_min_output_buffer(int(os.environ.get("DVBRX_FE_BUF", 1 << 16)))
+    _keep.append(blk)
+    return blk
+
+
+class _NoAgc(gr.hier_block2):
+    """Passthrough standing in for analog.agc_cc (the front-end has its own)."""
+
+    def __init__(self, *args):
+        gr.hier_block2.__init__(self, "no_agc",
+                                gr.io_signature(1, 1, gr.sizeof_gr_complex),
+                                gr.io_signature(1, 1, gr.sizeof_gr_complex))
+        self.connect(self, blocks.copy(gr.sizeof_gr_complex), self)
+        _keep.append(self)
+
+    def set_max_gain(self, gain):
+        pass
+
+
+_dvbs2rx = app.dvbs2rx
+
+
+def _xfecframe_demapper(frame_size, code_rate, constellation):
+    blk = _dvbs2rx.xfecframe_demapper_cb(frame_size, code_rate, constellation)
+    # The LDPC decoder consumes batches of up to 32 frames (one per SIMD lane);
+    # leave room for several batches.
+    nldpc = 16200 if frame_size == _dvbs2rx.FECFRAME_SHORT else 64800
+    blk.set_min_output_buffer(3 * 32 * nldpc)
+    return blk
+
+
+def _plsync(*args):
+    blk = _dvbs2rx.plsync_cc(*args)
+    blk.set_min_output_buffer(int(os.environ.get("DVBRX_PLSYNC_BUF", 1 << 18)))
+    return blk
+
+
+app.dvbs2rx = _Proxy(app.dvbs2rx, symbol_sync_cc=_symbol_sync,
+                     xfecframe_demapper_cb=_xfecframe_demapper, plsync_cc=_plsync)
+app.analog = _Proxy(app.analog, agc_cc=_NoAgc)
+
+if not os.environ.get("DVBRX_LLR_FEEDBACK"):
+    _msg_connect = app.DVBS2RxTopBlock.msg_connect
+
+    def _msg_connect_filtered(self, *args):
+        if any(isinstance(a, tuple) and a[1:] == ("llr_pdu",) for a in args):
+            return
+        return _msg_connect(self, *args)
+
+    app.DVBS2RxTopBlock.msg_connect = _msg_connect_filtered
+
+if __name__ == "__main__":
+    sys.exit(app.main())

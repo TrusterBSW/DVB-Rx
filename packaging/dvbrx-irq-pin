@@ -1,0 +1,11 @@
+#!/bin/sh
+# Move the USB host controller interrupts to the last CPU, so that the
+# receiver threads (kept off it by CPUAffinity in dvbrxd@.service.d/cpu.conf)
+# are not slowed down by USB interrupt and softirq work: at 30 Msps a B210
+# raises several thousand interrupts per second.
+last=$(($(nproc --all) - 1))
+for irq in $(awk -F: '/xhci/ { gsub(/ /, "", $1); print $1 }' /proc/interrupts); do
+    echo "$last" > "/proc/irq/$irq/smp_affinity_list" 2>/dev/null ||
+        echo "dvbrx-irq-pin: cannot move IRQ $irq" >&2
+done
+exit 0

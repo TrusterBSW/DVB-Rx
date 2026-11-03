@@ -1,0 +1,26 @@
+[Unit]
+Description=dvbrx SDR DVB-S/S2/S2X receiver for /dev/dvb/adapter%i
+Documentation=file:///usr/local/share/doc/dvbrx/README.md
+After=systemd-modules-load.service systemd-udev-settle.service
+ConditionPathExists=/dev/dvbrx%i
+
+[Service]
+Type=simple
+User=dvbrxd
+Group=video
+# serial LNB controller (dialout), USB access to the USRP (plugdev)
+SupplementaryGroups=dialout plugdev
+EnvironmentFile=/etc/dvbrxd/%i.conf
+ExecStart=/usr/local/bin/dvbrx -d %i $DVBRXD_ARGS
+Restart=on-failure
+RestartSec=2
+# the receiver is soft real time: favour it over batch work
+Nice=-10
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/dvbrxd
+
+[Install]
+WantedBy=multi-user.target
