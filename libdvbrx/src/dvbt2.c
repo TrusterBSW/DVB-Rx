@@ -882,6 +882,17 @@ static void restart(drx_dvbt2* d)
 
 /* ---- P1 detection and decoding ------------------------------------------------ */
 
+/* DRX_T2_DEBUG=1: P1, guard and L1-pre decoding steps on stderr. */
+static int t2_debug(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        const char* e = getenv("DRX_T2_DEBUG");
+        v = e && e[0] == '1';
+    }
+    return v;
+}
+
 /* Looks for a P1 in buf[pos..] (at most scan samples on); returns its
  * start, or -1 (pos advanced). */
 static int find_p1(drx_dvbt2* d, int scan)
@@ -989,6 +1000,8 @@ static int decode_p1(drx_dvbt2* d, int s)
     }
     d->s1 = v1;
     d->s2 = v2;
+    if (t2_debug())
+        fprintf(stderr, "t2: P1 at %d, S1 %d S2 %d, offset %.5f\n", s, v1, v2, d->f);
     if (v1 != 0) /* T2 SISO only */
         return -1;
     static const int FFT_OF_S2[8] = { 2048, 8192, 4096, 1024, 16384, 32768, 8192, 32768 };
@@ -1515,9 +1528,13 @@ static int decode_l1pre(drx_dvbt2* d)
         }
     free(punct);
     if (c != 1840 || l1_fec(d->ldpc_pre, d->bch_pre, p, llr, info)) {
+        if (t2_debug())
+            fprintf(stderr, "t2: L1-pre FEC failed (%d cells)\n", c);
         return -1;
     }
     if (crc32_bits(info, 200) != 0) {
+        if (t2_debug())
+            fprintf(stderr, "t2: L1-pre CRC failed\n");
         return -1;
     }
     struct l1pre* e = &d->pre;
@@ -1548,6 +1565,11 @@ static int decode_l1pre(drx_dvbt2* d)
     e->t2_version = bits(info, &at, 4);
     e->post_scrambled = bits(info, &at, 1);
     e->base_lite = bits(info, &at, 1);
+    if (t2_debug())
+        fprintf(stderr, "t2: L1-pre type %d bwt_ext %d S1 %d S2 %d guard %d papr %d l1 mod %d cod %d "
+                "PP%d frames %d symbols %d version %d post_scr %d\n", e->type, e->bwt_ext, e->s1, e->s2,
+                e->guard, e->papr, e->l1_mod, e->l1_cod, e->pilot_pattern, e->num_t2_frames,
+                e->num_data_symbols, e->t2_version, e->post_scrambled);
     if (e->pilot_pattern > 8 || e->guard > 6 || e->l1_mod > 3 || e->num_data_symbols < 1)
         return -1;
     return 0;
@@ -1586,12 +1608,18 @@ static int decode_l1post(drx_dvbt2* d)
     const int nblocks = (kpost_ex + p->kbch - 1) / p->kbch;
     const int ksig = (kpost_ex + nblocks - 1) / nblocks;
     const int kpost = ksig * nblocks;
-    if (e->post_size * eta % nblocks)
+    if (e->post_size * eta % nblocks) {
+        if (t2_debug())
+            fprintf(stderr, "t2: L1-post size %d x %d not divisible in %d blocks\n", e->post_size, eta, nblocks);
         return -1;
+    }
     const int npost = e->post_size * eta / nblocks;
     const int npunc = ksig + 168 + 9000 - npost;
-    if (npunc < 0 || npunc > 9000 || ksig > p->kbch)
+    if (npunc < 0 || npunc > 9000 || ksig > p->kbch) {
+        if (t2_debug())
+            fprintf(stderr, "t2: L1-post npunc %d ksig %d\n", npunc, ksig);
         return -1;
+    }
     const uint8_t* padding = eta <= 2 ? T2_POST_PADDING_BQPSK : eta == 4 ? T2_POST_PADDING_16QAM : T2_POST_PADDING_64QAM;
     const uint8_t* puncture = eta <= 2 ? T2_POST_PUNCTURE_BQPSK : eta == 4 ? T2_POST_PUNCTURE_16QAM : T2_POST_PUNCTURE_64QAM;
     /* information positions: groups of 360 bits (the last of 192) */
@@ -1642,6 +1670,10 @@ static int decode_l1post(drx_dvbt2* d)
             err += ((re - lr) * (re - lr) + (im - li) * (im - li)) * d->csi[q];
         }
         const float n0u = err / (npost / eta) + 1e-6f;
+        if (t2_debug())
+            fprintf(stderr, "t2: L1-post block %d: MER %.1f dB over %d cells\n", b,
+                    10 * log10f((eta == 1 ? 1.0f : 2.0f * (4.0f * (1 << (eta - 2)) - 1) / 3.0f) / n0u),
+                    npost / eta);
         /* demultiplexer and bit interleaver (16/64-QAM): soft[j] is bit j of
          * the codeword in transmission order */
         const int nc = eta == 4 ? 8 : 12, nr = npost / nc;
@@ -1692,6 +1724,8 @@ static int decode_l1post(drx_dvbt2* d)
     free(soft);
     free(info);
     if (!ok) {
+        if (t2_debug())
+            fprintf(stderr, "t2: L1-post FEC failed (%d blocks, %d cells/block)\n", nblocks, npost);
         free(post);
         return -1;
     }
@@ -1707,6 +1741,8 @@ static int decode_l1post(drx_dvbt2* d)
         }
     }
     if (crc32_bits(post, kpost_ex) != 0) {
+        if (t2_debug())
+            fprintf(stderr, "t2: L1-post CRC failed\n");
         free(post);
         return -1;
     }
@@ -1721,6 +1757,8 @@ static int decode_l1post(drx_dvbt2* d)
     if (e->s2 & 1)
         bits(post, &at, 4 + 22 + 8);
     if (num_plp > MAX_PLP || num_plp < 1) {
+        if (t2_debug())
+            fprintf(stderr, "t2: %d PLPs\n", num_plp);
         free(post);
         return -1;
     }
@@ -1768,6 +1806,12 @@ static int decode_l1post(drx_dvbt2* d)
     d->num_plp = num_plp;
     /* the PLP to decode: asked for, or the first data PLP */
     d->sel = -1;
+    if (t2_debug())
+        for (int i = 0; i < num_plp; i++)
+            fprintf(stderr, "t2: PLP %d type %d payload %d cod %d mod %d rot %d fec %d blocks %d ti %d/%d mode %d\n",
+                    d->plps[i].id, d->plps[i].type, d->plps[i].payload_type, d->plps[i].cod, d->plps[i].mod,
+                    d->plps[i].rotation, d->plps[i].fec_type, d->plps[i].num_blocks, d->plps[i].time_il_type,
+                    d->plps[i].time_il_length, d->plps[i].mode);
     for (int i = 0; i < num_plp; i++) {
         const struct plp* q = &d->plps[i];
         if (d->want_plp >= 0 ? q->id == d->want_plp : q->type == 1 || q->type == 2) {
@@ -1795,6 +1839,8 @@ static int frame_l1(drx_dvbt2* d)
         if (make_layout(&L, d->n, e->bwt_ext, e->pilot_pattern, (e->papr & 2) != 0, e->guard))
             return -1;
         if (L.ktot != d->L.ktot || L.cp2 != d->L.cp2) {
+            if (t2_debug())
+                fprintf(stderr, "t2: P2 layout guessed differently, next frame\n");
             /* the P2 cells were laid out differently: next frame */
             free_layout(&d->L);
             d->L = L;
@@ -2410,6 +2456,8 @@ static int acquire(drx_dvbt2* d)
             return 0;
         }
         if (decode_p1(d, s) || detect_guard(d, s) < 0) {
+            if (t2_debug() && d->s1 == 0)
+                fprintf(stderr, "t2: guard not found after the P1 (FFT %d)\n", d->n);
             d->pos = s + 1024;
             continue;
         }
