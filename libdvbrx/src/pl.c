@@ -40,6 +40,18 @@ typedef float complex cf;
 #define CAP (4 * MAX_FRAME)
 #define SLIP 2 /* symbols of timing slip tolerated between headers */
 
+/* Equaliser: symbol-spaced complex FIR of EQ_N taps, trained by least
+ * squares on the known symbols (header and pilots) of one pilot frame in
+ * EQ_EVERY, with forgetting. The analog filters of wideband SDRs (two
+ * AD9361 back to back at 45 Mbaud) leave inter-symbol interference that
+ * capped the SNR at 18 dB. */
+#define EQ_D 7
+#define EQ_N (2 * EQ_D + 1)
+#define EQ_EVERY 4
+#define EQ_EVERY_SLOW 16
+#define EQ_LAMBDA 0.7
+#define EQ_KEEP 16 /* symbols kept before the frame (>= EQ_D) */
+
 #define TH_DETECT 0.4f  /* normalised header metric, search */
 #define TH_CONFIRM 0.3f /* next header, before locking */
 #define TH_TRACK 0.2f   /* header while locked */
@@ -118,6 +130,17 @@ struct drx_pl {
     drx_pl_out_cb get_out;
     uint64_t index;
     drx_pl_stats stats;
+
+    /* equaliser, see EQ_N */
+    int eq_on, eq_count, eq_phase;
+    cf eq_w[EQ_N];
+    double complex eq_R[EQ_N][EQ_N], eq_p[EQ_N];
+    cf* yeq;
+    /* carrier of the last pilot-aided frame: phase ph[s] + slope[s] k
+     * (plus omega0 k) in segment s, see frame_pilot_aided() */
+    double fr_ph[MAX_PILOTS + 2], fr_slope[MAX_PILOTS + 2], fr_omega0;
+    int fr_nseg;
+    float fr_amp;
 };
 
 static void rotate(const cf* y, int n, double ph0, double dph, float g, const cf* descr, cf* out);
@@ -499,6 +522,15 @@ static void pll_weights(drx_pl* pl)
     }
 }
 
+static void eq_reset(drx_pl* pl)
+{
+    memset(pl->eq_R, 0, sizeof(pl->eq_R));
+    memset(pl->eq_p, 0, sizeof(pl->eq_p));
+    for (int m = 0; m < EQ_N; m++)
+        pl->eq_w[m] = m == EQ_D ? 1.0f : 0.0f;
+    pl->eq_count = pl->eq_phase = 0;
+}
+
 drx_pl* drx_pl_new(int gold_code)
 {
     drx_pl* pl = calloc(1, sizeof(*pl));
@@ -508,7 +540,8 @@ drx_pl* drx_pl_new(int gold_code)
     pl->descr = malloc(sizeof(cf) * MAX_PAYLOAD);
     pl->out = malloc(sizeof(cf) * MAX_PAYLOAD);
     pl->z = malloc(sizeof(cf) * (MAX_FRAME + SOF_LEN));
-    if (!pl->buf || !pl->descr || !pl->out || !pl->z) {
+    pl->yeq = malloc(sizeof(cf) * (MAX_FRAME + SOF_LEN));
+    if (!pl->buf || !pl->descr || !pl->out || !pl->z || !pl->yeq) {
         drx_pl_free(pl);
         return NULL;
     }
@@ -534,6 +567,9 @@ drx_pl* drx_pl_new(int gold_code)
         pl->dref_plsc[i] = pl->hdr_plsc[0][2 * i + 1] * conjf(pl->hdr_plsc[0][2 * i]);
 
     pl->shift_pos = -1;
+    const char* eq = getenv("DRX_EQ");
+    pl->eq_on = !(eq && eq[0] == '0');
+    eq_reset(pl);
 
     /* Phase-locked loop, Bn*T = 2e-3 per symbol, damping 0.707 */
     const double bnt = 2e-3, z = M_SQRT1_2;
@@ -557,6 +593,7 @@ void drx_pl_free(drx_pl* pl)
     free(pl->descr);
     free(pl->out);
     free(pl->z);
+    free(pl->yeq);
     free(pl);
 }
 
@@ -580,6 +617,7 @@ void drx_pl_reset(drx_pl* pl)
     pl->locked = 0;
     pl->misses = 0;
     pl->shift_pos = -1;
+    eq_reset(pl);
 }
 
 void drx_pl_get_stats(const drx_pl* pl, drx_pl_stats* s)
@@ -811,6 +849,14 @@ static int frame_pilot_aided(drx_pl* pl, const struct pls* h, const cf* hdr, con
             ph[s] = b[s].phase - slope[s] * b[s].center;
         }
     }
+    for (int s = 0; s < nseg; s++) {
+        pl->fr_ph[s] = ph[s];
+        pl->fr_slope[s] = slope[s];
+    }
+    pl->fr_nseg = nseg;
+    pl->fr_omega0 = omega0;
+    pl->fr_amp = amp;
+
     /* Known symbols: error energy, split at the block centres. */
     *err += known_err(z, 0, HDR_LEN, ph[0], slope[0], inv_amp, hdr);
     *n_err += HDR_LEN;
@@ -939,6 +985,124 @@ static void track_freq(drx_pl* pl, const struct pls* h, const cf* hdr, const cf*
     pl->frames_locked++;
 }
 
+/* out[k] = sum_m w[m] y[k + m - EQ_D], k in [0, n); y is valid from
+ * y[-before] to y[after - 1] (zeros beyond). */
+static void eq_apply(const drx_pl* pl, const cf* y, int before, int after, int n, cf* out)
+{
+    typedef float v8f __attribute__((vector_size(32)));
+    const cf* w = pl->eq_w;
+    int k = 0;
+    /* vector part: 4 symbols at a time, all taps inside the valid range */
+    const int k_lo = EQ_D - before > 0 ? EQ_D - before : 0;
+    const int k_hi = after - EQ_D < n ? after - EQ_D : n;
+    v8f wr[EQ_N], wi[EQ_N];
+    for (int m = 0; m < EQ_N; m++) {
+        const float a = crealf(w[m]), b = cimagf(w[m]);
+        wr[m] = (v8f){ a, a, a, a, a, a, a, a };
+        wi[m] = (v8f){ -b, b, -b, b, -b, b, -b, b };
+    }
+    for (; k < k_lo && k < n; k++) {
+        cf acc = 0;
+        for (int m = 0; m < EQ_N; m++) {
+            const int i = k + m - EQ_D;
+            if (i >= -before && i < after)
+                acc += w[m] * y[i];
+        }
+        out[k] = acc;
+    }
+    for (; k + 4 <= k_hi; k += 4) {
+        v8f acc = { 0 };
+        const float* yf = (const float*)(y + k - EQ_D);
+        for (int m = 0; m < EQ_N; m++) {
+            v8f a;
+            memcpy(&a, yf + 2 * m, sizeof(a));
+            const v8f sw = __builtin_shufflevector(a, a, 1, 0, 3, 2, 5, 4, 7, 6);
+            acc += a * wr[m] + sw * wi[m];
+        }
+        memcpy((float*)(out + k), &acc, sizeof(acc));
+    }
+    for (; k < n; k++) {
+        cf acc = 0;
+        for (int m = 0; m < EQ_N; m++) {
+            const int i = k + m - EQ_D;
+            if (i >= -before && i < after)
+                acc += w[m] * y[i];
+        }
+        out[k] = acc;
+    }
+}
+
+/* Least squares update on the known symbols of a pilot frame: y (not
+ * equalised) against the reference symbols with the carrier phase and
+ * amplitude that frame_pilot_aided() measured on the equalised frame. */
+static void eq_train(drx_pl* pl, const cf* y, int before, int after, const struct pls* h,
+                     const cf* hdr)
+{
+    const cf pilot = (1.0f + 1.0f * I) * (float)M_SQRT1_2;
+    for (int i = 0; i < EQ_N; i++) {
+        pl->eq_p[i] *= EQ_LAMBDA;
+        for (int j = i; j < EQ_N; j++)
+            pl->eq_R[i][j] *= EQ_LAMBDA;
+    }
+    const int nb = 1 + h->npilots, nseg = pl->fr_nseg;
+    for (int b = 0; b < nb; b++) {
+        const int k0 = b ? pilot_start(b - 1) : 0, len = b ? PILOT_LEN : HDR_LEN;
+        if (k0 - EQ_D < -before || k0 + len + EQ_D > after)
+            continue;
+        for (int k = k0; k < k0 + len; k++) {
+            int s = 0;
+            if (b) { /* as frame_pilot_aided(): split at the block centre */
+                s = k < k0 + PILOT_LEN / 2 ? b - 1 : b;
+                s = s < nseg ? s : nseg - 1;
+            }
+            const double phi = pl->fr_omega0 * k + pl->fr_ph[s] + pl->fr_slope[s] * k;
+            double complex t = pl->fr_amp * cexp(I * phi);
+            t *= b ? pilot * conjf(pl->descr[k - HDR_LEN]) : hdr[k];
+            const cf* u = y + k - EQ_D;
+            for (int i = 0; i < EQ_N; i++) {
+                const double complex ci = conj((double complex)u[i]);
+                pl->eq_p[i] += ci * t;
+                for (int j = i; j < EQ_N; j++)
+                    pl->eq_R[i][j] += ci * u[j];
+            }
+        }
+    }
+    /* Cholesky of R (Hermitian, upper triangle stored), lightly loaded */
+    double complex L[EQ_N][EQ_N], z[EQ_N], x[EQ_N];
+    double tr = 0;
+    for (int i = 0; i < EQ_N; i++)
+        tr += creal(pl->eq_R[i][i]);
+    const double load = 1e-4 * tr / EQ_N;
+    for (int i = 0; i < EQ_N; i++) {
+        for (int j = 0; j <= i; j++) {
+            double complex sum = j == i ? pl->eq_R[i][i] + load : conj(pl->eq_R[j][i]);
+            for (int m = 0; m < j; m++)
+                sum -= L[i][m] * conj(L[j][m]);
+            if (j == i) {
+                if (creal(sum) <= 0)
+                    return;
+                L[i][i] = sqrt(creal(sum));
+            } else {
+                L[i][j] = sum / L[j][j];
+            }
+        }
+    }
+    for (int i = 0; i < EQ_N; i++) { /* L z = p */
+        double complex sum = pl->eq_p[i];
+        for (int m = 0; m < i; m++)
+            sum -= L[i][m] * z[m];
+        z[i] = sum / L[i][i];
+    }
+    for (int i = EQ_N - 1; i >= 0; i--) { /* L^H x = z */
+        double complex sum = z[i];
+        for (int m = i + 1; m < EQ_N; m++)
+            sum -= conj(L[m][i]) * x[m];
+        x[i] = sum / L[i][i];
+    }
+    for (int i = 0; i < EQ_N; i++)
+        pl->eq_w[i] = (cf)x[i];
+}
+
 /* Carrier recovery and output of one PLFRAME starting at y. next_sof: the
  * next frame's SOF follows in the buffer. */
 static void process_frame(drx_pl* pl, const cf* y, const struct pls* h, const cf* hdr,
@@ -948,6 +1112,12 @@ static void process_frame(drx_pl* pl, const cf* y, const struct pls* h, const cf
     if (h->dummy) {
         pl->stats.dummies++;
         return;
+    }
+    const cf* yraw = y;
+    const int before = (int)(y - pl->buf), after = (int)(pl->buf + pl->len - y);
+    if (pl->eq_on) {
+        eq_apply(pl, y, before, after, h->len + (next_sof ? SOF_LEN : 0), pl->yeq);
+        y = pl->yeq;
     }
     const double omega0 = pl->omega;
     if (h->pilots) { /* known blocks only, see frame_pilot_aided() */
@@ -974,6 +1144,11 @@ static void process_frame(drx_pl* pl, const cf* y, const struct pls* h, const cf
     pl->have_amp = 1;
     if (!nout)
         return;
+    if (pl->eq_on && h->pilots &&
+        pl->eq_phase++ % (pl->eq_count < 64 ? EQ_EVERY : EQ_EVERY_SLOW) == 0) {
+        eq_train(pl, yraw, before, after, h, hdr);
+        pl->eq_count++;
+    }
 
     const float n0 = (float)(err / (n_err ? n_err : 1));
     if (10.0f * log10f(1.0f / (n0 + 1e-20f)) < qef_db(&h->mc) - 4.0f) {
@@ -1072,7 +1247,7 @@ static void run(drx_pl* pl, drx_pl_cb cb, void* ctx)
             pl->pos += HDR_LEN;
             continue;
         }
-        if (pl->pos + best + h.len + SOF_LEN + SLIP > pl->len)
+        if (pl->pos + best + h.len + SOF_LEN + SLIP + EQ_D > pl->len)
             return; /* frame and next SOF not complete yet */
         if (pl->shift_pos >= 0 && pl->pos + best >= pl->shift_pos) {
             pl->omega -= pl->shift_delta;
@@ -1088,8 +1263,8 @@ static void run(drx_pl* pl, drx_pl_cb cb, void* ctx)
 void drx_pl_process(drx_pl* pl, const float* sym, int n, drx_pl_cb cb, void* ctx)
 {
     while (n > 0) {
-        if (pl->len + n > CAP && pl->pos > SLIP) {
-            const int keep_from = pl->pos - SLIP;
+        if (pl->len + n > CAP && pl->pos > SLIP + EQ_KEEP) {
+            const int keep_from = pl->pos - SLIP - EQ_KEEP;
             memmove(pl->buf, pl->buf + keep_from, sizeof(cf) * (pl->len - keep_from));
             pl->len -= keep_from;
             pl->pos -= keep_from;

@@ -96,3 +96,47 @@ pendant 25 s.
   Les prochains postes sont le démapping (1,7 s CPU pour 1,9 s de signal),
   la contention mémoire résiduelle du LDPC et le thread de rythme (0,6
   cœur). Côté émission, le dvbtx de l'i3 sature déjà vers 40 Mbd.
+
+## Vers 50 Mbd en direct (3/11/2026, suite)
+
+**CPU près du seuil.** Signal synthétique 50 Mbd roll-off 0,10 à 21,3 dB,
+comme en radio : 7,9 itérations LDPC par lot (6,0 par trame), soit 0,84× le temps réel.
+- Minimums du nœud de parité sur |x| bruts, offset appliqué une fois par
+  nœud : bit exact, +3 %.
+- Messages LDPC compressés écrits en non temporel (`_mm256_stream_si256`) :
+  +8 %. Ils ne sont relus qu'à l'itération suivante et chassaient du L3 les
+  données a posteriori des autres décodeurs.
+- Démodulation 256APSK par anneaux : 135/180 et 140/180 sont 8 anneaux
+  des mêmes 32 phases. La métrique R² − 2 R c_j se factorise : 32
+  projections, enveloppe inférieure des anneaux par phase, max_j c_j pour les
+  bits d'anneau. 1,8 fois plus rapide, 1 LLR sur 64 800 qui diffère d'une unité.
+- Banc LDPC seul (135/180, hôte) : 770 itérations de lot/s à 1 thread,
+  2 107 à 3, 1 808 à 4, 1 789 à 6. Au-delà de 3 décodeurs, leurs données
+  (2,5 Mo chacun) débordent du L3. La démodulation passe donc dans
+  ses propres threads (`demap_threads`, auto : -t 5 = 3 LDPC + 2 démodulation).
+- Résultat : 0,95× le temps réel. Il restait le nombre d'itérations.
+
+**Essai radio B210 → B210 avec le dvbtx optimisé** (gain TX 40) :
+40 Mbd passe (20,5 dB, 231 Mbit/s utiles, 0 erreur TS) ; à 45 Mbd, le SNR
+plafonnait à 17,5-18,4 dB, quels que soient le gain RX (14 à 38 dB), le
+placement du LO, la fréquence d'échantillonnage TX ou le roll-off. En baissant le gain TX
+de 10 dB, le SNR baissait de 2,5 dB : on en déduit un plancher indépendant du niveau d'environ
+18 dB. Ce n'est pas l'amplificateur, mais la réponse des filtres analogiques des deux
+AD9361 sur ±25 MHz, qui crée de l'interférence entre symboles.
+
+**Égaliseur** (`pl.c`) : filtre FIR complexe de 15 coefficients à 1 échantillon par symbole, appliqué à
+chaque trame avant la récupération de porteuse, appris par moindres carrés
+(oubli 0,7, Cholesky 15×15) sur l'en-tête et les pilotes d'une trame à
+pilotes sur 4, puis sur 16. La cible est le symbole connu, tourné par la phase et
+l'amplitude que la récupération à pilotes a mesurées sur la trame égalisée.
+`DRX_EQ=0` le désactive. Sur les captures réelles :
+
+| Capture | sans | avec |
+|---------|------|------|
+| 40 Mbd ro 0,10 | 20,5 dB, 11,7 it. | 24,4 dB, 3,2 it. |
+| 45 Mbd ro 0,10 | 19,0 dB, LDPC en échec | 24,7 dB, 3,1 it., 0 erreur TS |
+| 45 Mbd ro 0,05 | 17,7 dB, en échec | 24,8 dB, 3,1 it. |
+
+Le coût CPU n'est pas mesurable (sur un signal sans interférence entre symboles, la sortie reste identique).
+La capture à 45 Mbd se décode à 1,6× le temps réel, puisque le LDPC
+converge en 3 itérations au lieu de 8 à 12.
