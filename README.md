@@ -281,6 +281,12 @@ toutes les tailles FFT × intervalles de garde × motifs de pilotes × mode
 que son mappeur compte les bonnes cellules : signal incohérent) ; vérifié
 avec dvbtx, ainsi que 32K PP8 19/128 et 16K PP2 étendus : 0 erreur.
 
+## Pistes futures
+
+Voir `doc/A_FAIRE.md` : robustesse (resynchronisation DVB-S, égaliseur sans
+pilotes), support du BladeRF et du HackRF, contrôle LNB par ESP32, et les pistes
+d'optimisation de `doc/optimisation/`.
+
 ## Optimisation CPU (3/11/2026)
 
 Sur i5-9500, cœurs nécessaires en temps réel (avant → après) : DVB-T 8K
