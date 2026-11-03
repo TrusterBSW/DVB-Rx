@@ -53,3 +53,46 @@ dans tous les cas, plus de paquets livrés près du seuil.
 
 Piste : arrêt anticipé par bloc dans le décodeur LDPC (les blocs convergés
 d'un lot continuent aujourd'hui à itérer) ; même effet probable en DVB-S2.
+
+## DVB-S2X 256APSK à 35-45 Mbd sur un B210 (3/11/2026)
+
+Objectif : 256APSK 135/180 roll-off 0,2 au débit maximal d'un B210
+(61,44 Msps). Mesures sur l'hôte (i5-9500, 6 cœurs, VM et service dvbrxd@0
+actifs), signal synthétique à Es/N0 24 dB, fichier bouclé 8 fois, décodage
+aussi vite que possible (« × temps réel ») puis relecture temps réel `-R`
+pendant 25 s.
+
+| Étape | 35 Mbd | 40 Mbd | 45 Mbd |
+|-------|--------|--------|--------|
+| départ | ×0,85, pertes en `-R` | SNR 20,2 dB, 11,5 it. | refusé (< 1,5 sps) |
+| démapping groupé (`minima_grp`) | ×0,88 | | |
+| LDPC à messages compressés | ×1,20, 0 perte | ×0,71 | refusé |
+| demi-bande ×2 avant la boucle de rythme | ×1,23, SNR 24,2 dB, 4,2 it. | ×1,19, 23,9 dB | ×1,11, 23,8 dB, 0 perte en `-R` (259 Mbit/s TS) |
+
+- **Démapping 6 à 8 bits** (`demap.c`, `minima_grp`) : arbre de minimums par
+  groupes de 16 points, 8 symboles à la fois ; 256APSK 46,8 → 20,1 ns par
+  symbole, LLR identiques.
+- **LDPC limité par la mémoire** : le débit ne bougeait pas de 2 à 6 threads
+  (×0,9), `update` coûtait 3 fois plus de cycles à 5 threads qu'à 1. À
+  135/180, les messages occupent 8,5 Mo par décodeur (degré 17 × 16 200 nœuds
+  × 32 voies), relus et réécrits à chaque itération : le cache L3 (9 Mo) ne
+  suit pas. Le prefetch des nœuds de variable n'y change rien. Les messages
+  sont maintenant stockés compressés (min0, min1, index du minimum et bits de
+  signe, 7 par octet avec un bit de garde) : 6 vecteurs par nœud au lieu de
+  17, à partir du degré 9 (`COMP_MIN_DEG`). C'est bit exact (57 codes, AVX-512,
+  AVX2 et C générique, harnais comparant décisions et itérations).
+- **Frontal sous 2,5 échantillons par symbole** : l'interpolation cubique sur
+  la sortie du filtre adapté coûtait environ 1,7 dB de MER à 1,75 sps,
+  environ 4 dB à 1,54 sps, et le frontal refusait les débits sous 1,5 sps. La sortie du filtre est
+  maintenant interpolée ×2 (demi-bande Kaiser, 16 coefficients par côté,
+  environ 50 dB de réjection jusqu'à 0,44 fs) avant la boucle de Gardner :
+  le SNR mesuré retrouve celui du signal, et le LDPC converge en 4,2
+  itérations au lieu de 5,7. Le coût est d'environ 0,15 cœur dans le thread de rythme.
+- **50 Mbd** (1,23 échantillon par symbole) : décodage correct, SNR mesuré de 23,8 à 24,0 dB et 4,2 à 4,5 itérations,
+  mais 0,96× le temps réel au roll-off 0,10, 0,94× à 0,20 et 0,77× à 0,05 (un étage
+  séquentiel à identifier), machine chargée. Le roll-off 0,20 occupe 60 MHz,
+  au-delà des 56 MHz analogiques du B210.
+- **Suite** : à 45 Mbd il reste environ 10 % de marge avec la machine chargée.
+  Les prochains postes sont le démapping (1,7 s CPU pour 1,9 s de signal),
+  la contention mémoire résiduelle du LDPC et le thread de rythme (0,6
+  cœur). Côté émission, le dvbtx de l'i3 sature déjà vers 40 Mbd.

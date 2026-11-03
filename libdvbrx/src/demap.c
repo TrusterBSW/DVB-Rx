@@ -309,6 +309,81 @@ static inline __attribute__((always_inline)) void minima_avx(const drx_demap* d,
 }
 #endif
 
+#if defined(__AVX2__) && defined(__FMA__)
+/* Dense constellations (64 to 256 points), eight symbols at a time, same
+ * minima as minima_table (min is order-free: identical LLRs). minima_avx
+ * chains every point into the low-bit minima, a dependency chain of np / 2
+ * minimums (about 64 cycles a symbol for 256 points). Here the points go
+ * by groups of 16: within a group, the minima of the 4 low label bits come
+ * from a shallow tree, groups are independent (the core overlaps them), and
+ * the high bits come from the 16-point minima of the groups. */
+static inline __attribute__((always_inline)) __m256 min8(const __m256* v, int stride)
+{
+    const __m256 a = _mm256_min_ps(v[0], v[stride]), b = _mm256_min_ps(v[2 * stride], v[3 * stride]);
+    const __m256 c = _mm256_min_ps(v[4 * stride], v[5 * stride]), e = _mm256_min_ps(v[6 * stride], v[7 * stride]);
+    return _mm256_min_ps(_mm256_min_ps(a, b), _mm256_min_ps(c, e));
+}
+
+static inline __attribute__((always_inline)) void minima_grp(const drx_demap* d, const int nb,
+                                                             const float* x, const float* y,
+                                                             float m0[][BLK], float m1[][BLK])
+{
+    const int ng = 1 << (nb - 4);
+    for (int i = 0; i < BLK; i += 8) {
+        const __m256 X = _mm256_loadu_ps(x + i), Y = _mm256_loadu_ps(y + i);
+        __m256 lo[4], hi[4], gmin[16];
+        for (int g = 0; g < ng; g++) {
+            __m256 v[16];
+#pragma GCC unroll 16
+            for (int q = 0; q < 16; q++) {
+                const int p = 16 * g + q;
+                v[q] = _mm256_fmadd_ps(X, _mm256_broadcast_ss(&d->ar[p]),
+                                       _mm256_fmadd_ps(Y, _mm256_broadcast_ss(&d->ai[p]),
+                                                       _mm256_broadcast_ss(&d->e[p])));
+            }
+            /* label bit L of q (L = 0 is the label's LSB, bit nb - 1) */
+            const __m256 l0 = min8(v, 2), h0 = min8(v + 1, 2);
+            __m256 pr[8];
+            for (int k = 0; k < 8; k++)
+                pr[k] = _mm256_min_ps(v[2 * k], v[2 * k + 1]);
+            const __m256 l1 = _mm256_min_ps(_mm256_min_ps(pr[0], pr[2]), _mm256_min_ps(pr[4], pr[6]));
+            const __m256 h1 = _mm256_min_ps(_mm256_min_ps(pr[1], pr[3]), _mm256_min_ps(pr[5], pr[7]));
+            const __m256 q0 = _mm256_min_ps(pr[0], pr[1]), q1 = _mm256_min_ps(pr[2], pr[3]);
+            const __m256 q2 = _mm256_min_ps(pr[4], pr[5]), q3 = _mm256_min_ps(pr[6], pr[7]);
+            const __m256 l2 = _mm256_min_ps(q0, q2), h2 = _mm256_min_ps(q1, q3);
+            const __m256 l3 = _mm256_min_ps(q0, q1), h3 = _mm256_min_ps(q2, q3);
+            gmin[g] = _mm256_min_ps(l3, h3);
+            if (g == 0) {
+                lo[0] = l0, hi[0] = h0, lo[1] = l1, hi[1] = h1;
+                lo[2] = l2, hi[2] = h2, lo[3] = l3, hi[3] = h3;
+            } else {
+                lo[0] = _mm256_min_ps(lo[0], l0), hi[0] = _mm256_min_ps(hi[0], h0);
+                lo[1] = _mm256_min_ps(lo[1], l1), hi[1] = _mm256_min_ps(hi[1], h1);
+                lo[2] = _mm256_min_ps(lo[2], l2), hi[2] = _mm256_min_ps(hi[2], h2);
+                lo[3] = _mm256_min_ps(lo[3], l3), hi[3] = _mm256_min_ps(hi[3], h3);
+            }
+        }
+        for (int L = 0; L < 4; L++) {
+            _mm256_storeu_ps(m0[nb - 1 - L] + i, lo[L]);
+            _mm256_storeu_ps(m1[nb - 1 - L] + i, hi[L]);
+        }
+        /* high label bits L = 4 .. nb - 1: bit L - 4 of the group index */
+        for (int L = 4; L < nb; L++) {
+            const int s = 1 << (L - 4);
+            __m256 a = _mm256_set1_ps(INFINITY), c = _mm256_set1_ps(INFINITY);
+            for (int g = 0; g < ng; g++) {
+                if (g & s)
+                    c = _mm256_min_ps(c, gmin[g]);
+                else
+                    a = _mm256_min_ps(a, gmin[g]);
+            }
+            _mm256_storeu_ps(m0[nb - 1 - L] + i, a);
+            _mm256_storeu_ps(m1[nb - 1 - L] + i, c);
+        }
+    }
+}
+#endif
+
 void drx_demap_frame(const drx_demap* d, const float* sym, float n0, int8_t* llr)
 {
     const float k = LLR_SCALE / n0;
@@ -336,6 +411,12 @@ void drx_demap_frame(const drx_demap* d, const float* sym, float n0, int8_t* llr
             minima_avx(d, 4, x, y, m0, m1);
         else if (nb == 5)
             minima_avx(d, 5, x, y, m0, m1);
+        else if (nb == 6)
+            minima_grp(d, 6, x, y, m0, m1);
+        else if (nb == 7)
+            minima_grp(d, 7, x, y, m0, m1);
+        else if (nb == 8)
+            minima_grp(d, 8, x, y, m0, m1);
         else
 #endif
             minima_table(d, x, y, m0, m1);

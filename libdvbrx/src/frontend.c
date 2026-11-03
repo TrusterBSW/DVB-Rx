@@ -20,6 +20,16 @@
 #define NACC 8     /* 8-float vectors accumulated in registers by the filter */
 #define NCO_BLK 64 /* samples rotated from one exact phasor */
 
+/* Below UP_SPS samples per symbol, the matched filter output is
+ * interpolated by 2 (half-band, HB_P taps on each side of the new samples)
+ * before the timing loop: the cubic interpolator needs the signal well
+ * below Nyquist, its error costs ~1.7 dB of MER at 1.75 samples per symbol
+ * (256APSK at 22 dB) and makes lock impossible below 1.5. */
+#ifndef UP_SPS
+#define UP_SPS 2.5f
+#endif
+#define HB_P 16
+
 /* Symbols between the computation of a timing correction and the strobe it
  * first moves, beyond the next one (see timing()). */
 #ifndef TDELAY
@@ -50,7 +60,11 @@ struct drx_frontend {
 
     float* y; /* interleaved I/Q matched filter output awaiting the timing loop */
     int ny, ycap;
-    int64_t y0; /* absolute input index of the sample y[0] is centred on */
+    int64_t y0; /* absolute index (in y samples, see up) of the sample y[0] is centred on */
+
+    int up;      /* y samples per input sample: 1, or 2 with the half-band */
+    float* hb;   /* half-band input: 2 HB_P history samples + CHUNK */
+    float hbc[HB_P];
 
     /* Sample positions in 32.32 fixed point (samples << 32): the integer
      * part indexes y, the fraction is the interpolation phase. Advancing
@@ -123,7 +137,7 @@ static void set_loop_gains(drx_frontend* fe)
 
 drx_frontend* drx_frontend_new(const drx_frontend_cfg* cfg)
 {
-    if (cfg->sps < 1.5f || cfg->sps > 64.0f || cfg->rrc_delay < 1)
+    if (cfg->sps < 1.1f || cfg->sps > 64.0f || cfg->rrc_delay < 1)
         return NULL;
 
     drx_frontend* fe = calloc(1, sizeof(*fe));
@@ -136,9 +150,13 @@ drx_frontend* drx_frontend_new(const drx_frontend_cfg* cfg)
     fe->taps = malloc(sizeof(float) * fe->ntaps);
     fe->nhist = fe->ntaps - 1;
     fe->x = calloc(2 * (size_t)(fe->nhist + CHUNK), sizeof(float));
-    fe->ycap = CHUNK + 2 * (int)ceilf(cfg->sps) + 16;
+    fe->up = cfg->sps < UP_SPS ? 2 : 1;
+    const float ysps = cfg->sps * fe->up; /* samples per symbol in y */
+    fe->ycap = fe->up * CHUNK + 2 * (int)ceilf(ysps) + 16;
     fe->y = malloc(sizeof(float) * 2 * fe->ycap);
-    if (!fe->taps || !fe->x || !fe->y) {
+    if (fe->up > 1)
+        fe->hb = calloc(2 * (size_t)(2 * HB_P + CHUNK), sizeof(float));
+    if (!fe->taps || !fe->x || !fe->y || (fe->up > 1 && !fe->hb)) {
         drx_frontend_free(fe);
         return NULL;
     }
@@ -152,12 +170,38 @@ drx_frontend* drx_frontend_new(const drx_frontend_cfg* cfg)
     for (int i = 0; i < fe->ntaps; i++)
         fe->taps[i] /= (float)sqrt(energy);
 
-    /* The zero history makes y[0] centre on input index -half_len. */
-    fe->y0 = -half_len;
-    fe->thalf = llround(ldexp(cfg->sps / 2.0, 32));
-    fe->tsps = llround(ldexp(cfg->sps, 32));
-    fe->tsps_f = ldexpf(cfg->sps, 32);
-    fe->tpos = (int64_t)((int)(cfg->sps / 2) + 2) << 32;
+    /* Half-band: the new sample half way between x[m] and x[m + 1] is
+     * sum c_j (x[m - j] + x[m + 1 + j]), a Kaiser windowed sinc (about 50 dB
+     * of image rejection with the band edge at 0.44 of the input rate:
+     * 45 Mbaud, roll-off 0.2, at 61.44 Msps). */
+    if (fe->up > 1) {
+        const double beta = 5.0, span = HB_P + 0.5;
+        double sum = 0;
+        for (int j = 0; j < HB_P; j++) {
+            const double t = j + 0.5, r = t / span;
+            /* I0 by its series */
+            double a = beta * sqrt(1 - r * r), i0 = 1, term = 1, i0b = 1, tb = 1;
+            for (int k = 1; k < 30; k++) {
+                term *= (a / (2 * k)) * (a / (2 * k));
+                i0 += term;
+                tb *= (beta / (2 * k)) * (beta / (2 * k));
+                i0b += tb;
+            }
+            const double c = sin(M_PI * t) / (M_PI * t) * i0 / i0b;
+            fe->hbc[j] = (float)c;
+            sum += 2 * c;
+        }
+        for (int j = 0; j < HB_P; j++) /* unit gain at DC */
+            fe->hbc[j] /= (float)sum;
+    }
+
+    /* The zero history makes y[0] centre on input index -half_len, or
+     * HB_P + 1 samples before that through the half-band. */
+    fe->y0 = fe->up > 1 ? (int64_t)fe->up * (-half_len - HB_P - 1) : -half_len;
+    fe->thalf = llround(ldexp(ysps / 2.0, 32));
+    fe->tsps = llround(ldexp(ysps, 32));
+    fe->tsps_f = ldexpf(ysps, 32);
+    fe->tpos = (int64_t)((int)(ysps / 2) + 2) << 32;
     for (int j = 0; j < (int)(sizeof(fe->tadv) / sizeof(fe->tadv[0])); j++)
         fe->tadv[j] = fe->tsps;
     fe->tab_freq = NAN;
@@ -173,6 +217,7 @@ void drx_frontend_free(drx_frontend* fe)
     free(fe->taps);
     free(fe->x);
     free(fe->y);
+    free(fe->hb);
     free(fe);
 }
 
@@ -278,12 +323,56 @@ static void mf(drx_frontend* fe, const float* in, int n, float* y)
     memmove(x, x + 2 * n, sizeof(float) * 2 * fe->nhist);
 }
 
+/* Interpolation by 2 of the n (<= CHUNK) samples in fe->hb after its
+ * history into y (2 n samples): x[m] then the half-band sample after it,
+ * HB_P + 1 input samples late. */
+static void halfband(drx_frontend* fe, int n, float* y)
+{
+    float* restrict s = fe->hb;
+    const float* c = fe->hbc;
+    int i = 0;
+    for (; i + 4 <= n; i += 4) {
+        /* 4 complex samples per vector: outputs for m = i + HB_P - 1 .. + 3 */
+        const float* xm = s + 2 * (i + HB_P - 1);
+        v8f acc0 = { 0 }, acc1 = { 0 };
+        for (int j = 0; j < HB_P; j += 2) {
+            acc0 += c[j] * (ld8(xm - 2 * j) + ld8(xm + 2 * (j + 1)));
+            acc1 += c[j + 1] * (ld8(xm - 2 * (j + 1)) + ld8(xm + 2 * (j + 2)));
+        }
+        const v8f h = acc0 + acc1, x = ld8(xm);
+        st8(y + 4 * i, __builtin_shufflevector(x, h, 0, 1, 8, 9, 2, 3, 10, 11));
+        st8(y + 4 * i + 8, __builtin_shufflevector(x, h, 4, 5, 12, 13, 6, 7, 14, 15));
+    }
+    for (; i < n; i++) {
+        const float* xm = s + 2 * (i + HB_P - 1);
+        float re = 0, im = 0;
+        for (int j = 0; j < HB_P; j++) {
+            re += c[j] * (xm[-2 * j] + xm[2 * (j + 1)]);
+            im += c[j] * (xm[-2 * j + 1] + xm[2 * (j + 1) + 1]);
+        }
+        y[4 * i] = xm[0];
+        y[4 * i + 1] = xm[1];
+        y[4 * i + 2] = re;
+        y[4 * i + 3] = im;
+    }
+    memmove(s, s + 2 * n, sizeof(float) * 2 * 2 * HB_P);
+}
+
 /* Make n filtered samples available to the timing loop: filter them from
- * the input (filtered == 0) or copy already filtered ones. */
+ * the input (filtered == 0) or copy already filtered ones, then
+ * interpolate them by fe->up. */
 static void append(drx_frontend* fe, const float* in, int n, int filtered)
 {
     float* y = fe->y + 2 * fe->ny;
-    if (filtered)
+    if (fe->up > 1) {
+        float* hbin = fe->hb + 2 * 2 * HB_P;
+        if (filtered)
+            memcpy(hbin, in, sizeof(float) * 2 * n);
+        else
+            mf(fe, in, n, hbin);
+        halfband(fe, n, y);
+        n *= fe->up;
+    } else if (filtered)
         memcpy(y, in, sizeof(float) * 2 * n);
     else
         mf(fe, in, n, y);
@@ -404,7 +493,7 @@ static int timing(drx_frontend* fe, float* out, int max_out, uint64_t* strobe)
                 goto done;
             if (strobe) {
                 int64_t a = fe->y0 + ((pos + ((int64_t)1 << 31)) >> 32);
-                strobe[k] = a > 0 ? (uint64_t)a : 0;
+                strobe[k] = a > 0 ? (uint64_t)a / (unsigned)fe->up : 0;
             }
             const int64_t adv = tsym(&l, pos, &prev, &vi, out + 2 * k);
             k++;
