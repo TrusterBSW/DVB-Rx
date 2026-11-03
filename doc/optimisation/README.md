@@ -22,6 +22,9 @@ idées non essayées, commandes de mesure) :
 - `dvbt-viterbi-outer.md` : Viterbi, dépoinçonnage, couche externe (RS,
   désentrelaceur), démappeur DVB-T.
 - `dvbs2-pl-ldpc-demap.md` : synchro PL, LDPC, démappeur, BCH, BB, pipeline.
+- `analyse-dvbs-s2.md` : **à faire plus tard** (DVB-S/S2/S2X, 3/11/2026) : bug de
+  resynchronisation DVB-S après une coupure, seuil de la demi-bande à 2 éch./sym,
+  égaliseur sans pilotes, pistes CPU restantes chiffrées (gain, charge).
 
 Banc : fichiers dans `work/bench/` (`s2_8psk34.fc32` dure 0,80 s à 27,5 Mbd),
 profilage `sudo perf record -g` sur l'hôte (perf_event_paranoid = 4).
