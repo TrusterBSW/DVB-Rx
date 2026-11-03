@@ -26,7 +26,12 @@ struct const_row {
 };
 #include "const_tables.h"
 
+#ifndef DEMAP_RING
+#define DEMAP_RING 1
+#endif
+#ifndef LLR_SCALE
 #define LLR_SCALE 2.0f
+#endif
 #define BLK 64 /* symbols demapped together */
 
 #define MAX_BITS 8
@@ -38,6 +43,13 @@ struct drx_demap {
     int order[MAX_BITS];
     float re[1 << MAX_BITS], im[1 << MAX_BITS];
     float ar[1 << MAX_BITS], ai[1 << MAX_BITS], e[1 << MAX_BITS]; /* -2 re, -2 im, |p|^2 */
+
+    /* Ring constellations (DVB-S2X 256APSK 135/180 and 140/180: 8 rings of
+     * the same 32 phases), see minima_ring(): point p is
+     * R[p >> ring_pb] (cos, sin)[p & (2^ring_pb - 1)]; ring_pb 0 if not. */
+    int ring_pb;
+    float rc[32], rs[32];   /* phase unit vectors, by low label bits */
+    float rm2[8], rr2[8];   /* -2 R and R^2, by high label bits */
 
     /* Dense constellations: for each cell of a grid over the I/Q plane,
      * the points that can be the closest one with some bit at some value
@@ -121,6 +133,34 @@ static int build_lut(drx_demap* d)
     return 0;
 }
 
+/* Points that are rings of the same phases, the ring in the high label
+ * bits and the phase in the low ones (5 phase bits and 3 ring bits only:
+ * the case minima_ring() is compiled for). */
+static void detect_rings(drx_demap* d)
+{
+    const int pb = 5, P = 1 << pb, nr = d->npoints >> pb;
+    d->ring_pb = 0;
+    if (d->bits != 8)
+        return;
+    for (int r = 0; r < nr; r++) {
+        const float R = hypotf(d->re[r << pb], d->im[r << pb]);
+        d->rm2[r] = -2 * R;
+        d->rr2[r] = R * R;
+    }
+    const float R0 = hypotf(d->re[0], d->im[0]);
+    for (int j = 0; j < P; j++) {
+        d->rc[j] = d->re[j] / R0;
+        d->rs[j] = d->im[j] / R0;
+    }
+    for (int p = 0; p < d->npoints; p++) {
+        const float R = -0.5f * d->rm2[p >> pb];
+        if (fabsf(R * d->rc[p & (P - 1)] - d->re[p]) > 1e-5f ||
+            fabsf(R * d->rs[p & (P - 1)] - d->im[p]) > 1e-5f)
+            return;
+    }
+    d->ring_pb = pb;
+}
+
 drx_demap* drx_demap_new(const char* constellation, const char* rate, int short_frame)
 {
     static_assert(MAX_BITS <= 8, "candidate indexes are bytes");
@@ -154,6 +194,7 @@ drx_demap* drx_demap_new(const char* constellation, const char* rate, int short_
         d->ai[p] = -2 * d->im[p];
         d->e[p] = d->re[p] * d->re[p] + d->im[p] * d->im[p];
     }
+    detect_rings(d);
     if (d->npoints >= 32 && build_lut(d)) {
         drx_demap_free(d);
         return NULL;
@@ -384,6 +425,69 @@ static inline __attribute__((always_inline)) void minima_grp(const drx_demap* d,
 }
 #endif
 
+#if defined(__AVX2__) && defined(__FMA__)
+/* Per-bit minima over the bits of an index (bit L of the label is bit
+ * L - L0 of the index): minima of the even and odd entries, then the pairs
+ * merged for the next bit (t is overwritten). */
+static inline __attribute__((always_inline)) void bit_tree(__m256* t, int n, int nb, int L0, int i,
+                                                           float m0[][BLK], float m1[][BLK])
+{
+    for (int L = L0; n > 1; L++, n /= 2) {
+        __m256 lo = t[0], hi = t[1];
+        for (int k = 2; k < n; k += 2) {
+            lo = _mm256_min_ps(lo, t[k]);
+            hi = _mm256_min_ps(hi, t[k + 1]);
+        }
+        _mm256_storeu_ps(m0[nb - 1 - L] + i, lo);
+        _mm256_storeu_ps(m1[nb - 1 - L] + i, hi);
+        for (int k = 0; k < n / 2; k++)
+            t[k] = _mm256_min_ps(t[2 * k], t[2 * k + 1]);
+    }
+}
+
+/*
+ * Ring constellations, same minima as the full search up to rounding: the
+ * metric of ring r, phase j is R_r^2 - 2 R_r c_j with c_j the projection
+ * of the symbol on phase j. So the minimum over phases for a ring (all
+ * that the ring bits need) is at the largest projection, and the minimum
+ * over rings for a phase is the lower envelope of 8 lines at c_j: 32
+ * projections and 256 multiply-adds per symbol, instead of 512, with 30 %
+ * of the comparisons of minima_grp (2 times faster for 256APSK).
+ */
+static inline __attribute__((always_inline)) void minima_ring(const drx_demap* d, const float* x,
+                                                              const float* y, float m0[][BLK],
+                                                              float m1[][BLK])
+{
+    enum { PB = 5, P = 1 << PB, NR = 8, NB = 8 };
+    for (int i = 0; i < BLK; i += 8) {
+        const __m256 X = _mm256_loadu_ps(x + i), Y = _mm256_loadu_ps(y + i);
+        __m256 pm[P], rm[NR], cmax = _mm256_set1_ps(-INFINITY);
+        for (int j0 = 0; j0 < P; j0 += 4) {
+            __m256 c[4], a[4];
+            for (int k = 0; k < 4; k++) {
+                c[k] = _mm256_fmadd_ps(X, _mm256_broadcast_ss(&d->rc[j0 + k]),
+                                       _mm256_mul_ps(Y, _mm256_broadcast_ss(&d->rs[j0 + k])));
+                cmax = _mm256_max_ps(cmax, c[k]);
+            }
+#pragma GCC unroll 8
+            for (int r = 0; r < NR; r++) {
+                const __m256 A = _mm256_broadcast_ss(&d->rm2[r]), B = _mm256_broadcast_ss(&d->rr2[r]);
+                for (int k = 0; k < 4; k++) {
+                    const __m256 t = _mm256_fmadd_ps(c[k], A, B);
+                    a[k] = r ? _mm256_min_ps(a[k], t) : t;
+                }
+            }
+            for (int k = 0; k < 4; k++)
+                pm[j0 + k] = a[k];
+        }
+        for (int r = 0; r < NR; r++)
+            rm[r] = _mm256_fmadd_ps(cmax, _mm256_broadcast_ss(&d->rm2[r]), _mm256_broadcast_ss(&d->rr2[r]));
+        bit_tree(pm, P, NB, 0, i, m0, m1);
+        bit_tree(rm, NR, NB, PB, i, m0, m1);
+    }
+}
+#endif
+
 void drx_demap_frame(const drx_demap* d, const float* sym, float n0, int8_t* llr)
 {
     const float k = LLR_SCALE / n0;
@@ -415,6 +519,8 @@ void drx_demap_frame(const drx_demap* d, const float* sym, float n0, int8_t* llr
             minima_grp(d, 6, x, y, m0, m1);
         else if (nb == 7)
             minima_grp(d, 7, x, y, m0, m1);
+        else if (nb == 8 && d->ring_pb == 5 && DEMAP_RING)
+            minima_ring(d, x, y, m0, m1);
         else if (nb == 8)
             minima_grp(d, 8, x, y, m0, m1);
         else

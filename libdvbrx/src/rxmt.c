@@ -45,6 +45,7 @@ struct batch {
     int n;
     drx_fec_params fec;
     int iter;
+    int demapped; /* by a demapper thread, else by the LDPC worker */
     float* sym[MAX_LANES];
     float n0[MAX_LANES];
     int8_t* llr[MAX_LANES];
@@ -63,10 +64,12 @@ struct drx_mt {
     void* ctx;
     int nbatch, batch_max;
 
-    struct queue free_s, samp_q, filt_q, free_y, sym_q, free_b, ldpc_q, done_q;
+    struct queue free_s, samp_q, filt_q, free_y, sym_q, free_b, demap_q, ldpc_q, done_q;
     pthread_t t_mf, t_timing, t_pl, t_out;
     struct worker workers[MAX_WORKERS];
     int nworkers, workers_left;
+    pthread_t t_demap[MAX_WORKERS];
+    int ndemap, demap_left;
     pthread_mutex_t workers_lock;
     int started, finished;
 
@@ -116,6 +119,7 @@ void drx_mt_cfg_default(drx_mt_cfg* cfg, float sps, float rolloff)
     cfg->bandwidth = 0;
     cfg->dvbt2 = 0;
     cfg->ldpc_threads = 2;
+    cfg->demap_threads = -1;
     cfg->max_latency_ms = 100;
 }
 
@@ -184,9 +188,13 @@ static void* timing_thread(void* arg)
 
 /* ---- PL + demapper thread ------------------------------------------------ */
 
+/* Where the PL thread sends its batches: demapper threads, or straight to
+ * the LDPC workers. */
+static struct queue* feed(drx_mt* mt) { return mt->ndemap ? &mt->demap_q : &mt->ldpc_q; }
+
 static void send_batch(drx_mt* mt, int i)
 {
-    queue_push(&mt->ldpc_q, mt->open[i]);
+    queue_push(feed(mt), mt->open[i]);
     memmove(mt->open + i, mt->open + i + 1, sizeof(*mt->open) * (mt->nopen - i - 1));
     mt->nopen--;
 }
@@ -218,6 +226,7 @@ static struct batch* batch_for(drx_mt* mt, const drx_modcod* m, const drx_fec_pa
     b->fec = *fec;
     b->demap = dm;
     b->n = b->emit = 0;
+    b->demapped = 0;
     clock_gettime(CLOCK_MONOTONIC, &b->start);
     mt->open[mt->nopen++] = b;
     return b;
@@ -329,7 +338,7 @@ static void* dvbs_thread(void* arg)
     mt->st.ts_packets = ds.packets;
     mt->st.ts_crc_errors = mt->st.bch_failed = ds.rs_failed;
     pthread_mutex_unlock(&mt->stats_lock);
-    queue_close(&mt->ldpc_q);
+    queue_close(feed(mt));
     return NULL;
 }
 
@@ -369,7 +378,7 @@ static void* dvbc_thread(void* arg)
         mt->st.bch_failed = cs.rs_failed;
         pthread_mutex_unlock(&mt->stats_lock);
     }
-    queue_close(&mt->ldpc_q);
+    queue_close(feed(mt));
     return NULL;
 }
 
@@ -400,7 +409,7 @@ static void* dvbt_thread(void* arg)
         pthread_mutex_unlock(&mt->stats_lock);
     }
     drx_dvbt_flush(mt->dvbt);
-    queue_close(&mt->ldpc_q);
+    queue_close(feed(mt));
     return NULL;
 }
 
@@ -437,7 +446,7 @@ static void* dvbt2_thread(void* arg)
     }
     drx_dvbt2_flush(mt->dvbt2); /* the last frames' TS */
     dvbt2_stats(mt);
-    queue_close(&mt->ldpc_q);
+    queue_close(feed(mt));
     return NULL;
 }
 
@@ -470,11 +479,31 @@ static void* pl_thread(void* arg)
         pthread_mutex_unlock(&mt->stats_lock);
     }
     send_all(mt);
-    queue_close(&mt->ldpc_q);
+    queue_close(feed(mt));
     return NULL;
 }
 
 /* ---- LDPC workers --------------------------------------------------------- */
+
+/* Demapping in threads of its own (dense APSK): with it, the LDPC workers
+ * were 5 decoders whose working sets (2.5 MB each at 32 lanes) overflowed
+ * the L3 cache; 3 decoders alone decode more (memory bound beyond). */
+static void* demap_thread(void* arg)
+{
+    drx_mt* mt = arg;
+    struct batch* b;
+    while ((b = queue_pop(&mt->demap_q, -1))) {
+        for (int f = 0; f < b->n; f++)
+            drx_demap_frame(b->demap, b->sym[f], b->n0[f], b->llr[f]);
+        b->demapped = 1;
+        queue_push(&mt->ldpc_q, b);
+    }
+    pthread_mutex_lock(&mt->workers_lock);
+    if (--mt->demap_left == 0)
+        queue_close(&mt->ldpc_q);
+    pthread_mutex_unlock(&mt->workers_lock);
+    return NULL;
+}
 
 static void* ldpc_thread(void* arg)
 {
@@ -485,8 +514,9 @@ static void* ldpc_thread(void* arg)
         drx_ldpc** ld = &w->ldpc[b->mc.pls >> 1];
         if (!*ld)
             *ld = drx_ldpc_new(&b->fec, b->mc.rate);
-        for (int f = 0; f < b->n; f++)
-            drx_demap_frame(b->demap, b->sym[f], b->n0[f], b->llr[f]);
+        if (!b->demapped)
+            for (int f = 0; f < b->n; f++)
+                drx_demap_frame(b->demap, b->sym[f], b->n0[f], b->llr[f]);
         b->iter = *ld ? drx_ldpc_decode(*ld, (const int8_t* const*)b->llr, b->cw, b->n,
                                         mt->cfg.rx.ldpc_iter)
                       : -1;
@@ -579,10 +609,21 @@ drx_mt* drx_mt_new(const drx_mt_cfg* cfg, drx_ts_cb cb, void* ctx)
     mt->cfg = *cfg;
     mt->cb = cb;
     mt->ctx = ctx;
-    mt->nworkers = cfg->ldpc_threads < 1 ? 1
+    int nthreads = cfg->ldpc_threads < 1 ? 1
                    : cfg->ldpc_threads > MAX_WORKERS ? MAX_WORKERS
                                                      : cfg->ldpc_threads;
-    mt->nbatch = 2 * mt->nworkers + 2 + MAX_OPEN;
+    /* auto: beyond 3 decoder threads, 1 or 2 of them demap */
+    mt->ndemap = cfg->demap_threads >= 0 ? cfg->demap_threads
+                 : nthreads >= 5         ? 2
+                 : nthreads == 4         ? 1
+                                         : 0;
+    if (cfg->demap_threads < 0 && !(cfg->dvbs || cfg->dvbc || cfg->dvbt || cfg->dvbt2))
+        nthreads -= mt->ndemap;
+    if (cfg->dvbs || cfg->dvbc || cfg->dvbt || cfg->dvbt2)
+        mt->ndemap = 0;
+    mt->ndemap = mt->ndemap > MAX_WORKERS ? MAX_WORKERS : mt->ndemap;
+    mt->nworkers = nthreads < 1 ? 1 : nthreads;
+    mt->nbatch = 2 * mt->nworkers + 2 * mt->ndemap + 2 + MAX_OPEN;
     mt->batch_max = drx_ldpc_lanes();
     if (cfg->rx.max_batch > 0 && cfg->rx.max_batch < mt->batch_max)
         mt->batch_max = cfg->rx.max_batch;
@@ -613,6 +654,7 @@ drx_mt* drx_mt_new(const drx_mt_cfg* cfg, drx_ts_cb cb, void* ctx)
     ok = ok && !queue_init(&mt->free_s, NSBLK) && !queue_init(&mt->samp_q, NSBLK) &&
          !queue_init(&mt->filt_q, NSBLK) && !queue_init(&mt->free_y, NYBLK) && !queue_init(&mt->sym_q, NYBLK) &&
          !queue_init(&mt->free_b, mt->nbatch) && !queue_init(&mt->ldpc_q, mt->nbatch) &&
+         !queue_init(&mt->demap_q, mt->nbatch) &&
          !queue_init(&mt->done_q, mt->nbatch);
     for (int i = 0; ok && i < NSBLK; i++) {
         struct sblock* s = malloc(sizeof(*s));
@@ -644,6 +686,7 @@ drx_mt* drx_mt_new(const drx_mt_cfg* cfg, drx_ts_cb cb, void* ctx)
     }
 
     mt->workers_left = mt->nworkers;
+    mt->demap_left = mt->ndemap;
     pthread_create(&mt->t_mf, NULL, mf_thread, mt);
     pthread_setname_np(mt->t_mf, "drx-filter");
     pthread_create(&mt->t_timing, NULL, timing_thread, mt);
@@ -657,6 +700,12 @@ drx_mt* drx_mt_new(const drx_mt_cfg* cfg, drx_ts_cb cb, void* ctx)
         mt->workers[i].mt = mt;
         pthread_create(&mt->workers[i].thread, NULL, ldpc_thread, &mt->workers[i]);
         pthread_setname_np(mt->workers[i].thread, name);
+    }
+    for (int i = 0; i < mt->ndemap; i++) {
+        char name[16];
+        snprintf(name, sizeof(name), "drx-demap%d", i);
+        pthread_create(&mt->t_demap[i], NULL, demap_thread, mt);
+        pthread_setname_np(mt->t_demap[i], name);
     }
     pthread_create(&mt->t_out, NULL, out_thread, mt);
     pthread_setname_np(mt->t_out, "drx-output");
@@ -704,6 +753,8 @@ void drx_mt_finish(drx_mt* mt)
     pthread_join(mt->t_mf, NULL);
     pthread_join(mt->t_timing, NULL);
     pthread_join(mt->t_pl, NULL);
+    for (int i = 0; i < mt->ndemap; i++)
+        pthread_join(mt->t_demap[i], NULL);
     for (int i = 0; i < mt->nworkers; i++)
         pthread_join(mt->workers[i].thread, NULL);
     pthread_join(mt->t_out, NULL);
@@ -739,6 +790,7 @@ void drx_mt_free(drx_mt* mt)
     free_queue_items(&mt->free_y, 0);
     free_queue_items(&mt->sym_q, 0);
     free_queue_items(&mt->free_b, 1);
+    free_queue_items(&mt->demap_q, 1);
     free_queue_items(&mt->ldpc_q, 1);
     free_queue_items(&mt->done_q, 1);
     for (int m = 0; m < 128; m++) {

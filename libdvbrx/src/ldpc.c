@@ -69,6 +69,12 @@ static inline vec v_shift_in_sign(vec a, vec b)
 static inline vec v_eq(vec a, vec b) { return _mm512_movm_epi8(_mm512_cmpeq_epi8_mask(a, b)); }
 static inline vec v_and(vec a, vec b) { return _mm512_and_si512(a, b); }
 static inline vec v_add(vec a, vec b) { return _mm512_add_epi8(a, b); }
+/* unsigned byte operations: |a| as 0..128, and its minimums */
+static inline vec v_abs(vec a) { return _mm512_abs_epi8(a); }
+static inline void v_stream(vec* p, vec a) { _mm512_stream_si512((void*)p, a); }
+static inline vec v_minu(vec a, vec b) { return _mm512_min_epu8(a, b); }
+static inline vec v_maxu(vec a, vec b) { return _mm512_max_epu8(a, b); }
+static inline vec v_subsu(vec a, vec b) { return _mm512_subs_epu8(a, b); }
 #elif defined(__AVX2__)
 #define LANES 32
 typedef __m256i vec;
@@ -101,6 +107,11 @@ static inline vec v_shift_in_sign(vec a, vec b)
 static inline vec v_eq(vec a, vec b) { return _mm256_cmpeq_epi8(a, b); }
 static inline vec v_and(vec a, vec b) { return _mm256_and_si256(a, b); }
 static inline vec v_add(vec a, vec b) { return _mm256_add_epi8(a, b); }
+static inline vec v_abs(vec a) { return _mm256_abs_epi8(a); }
+static inline void v_stream(vec* p, vec a) { _mm256_stream_si256(p, a); }
+static inline vec v_minu(vec a, vec b) { return _mm256_min_epu8(a, b); }
+static inline vec v_maxu(vec a, vec b) { return _mm256_max_epu8(a, b); }
+static inline vec v_subsu(vec a, vec b) { return _mm256_subs_epu8(a, b); }
 #else
 #define LANES 16
 typedef struct {
@@ -142,6 +153,14 @@ static inline vec v_shift_in_sign(vec a, vec b) { VLOOP((int8_t)((uint8_t)a.v[i]
 static inline vec v_eq(vec a, vec b) { VLOOP((int8_t)(a.v[i] == b.v[i] ? -1 : 0)); }
 static inline vec v_and(vec a, vec b) { VLOOP(a.v[i] & b.v[i]); }
 static inline vec v_add(vec a, vec b) { VLOOP((int8_t)((uint8_t)a.v[i] + (uint8_t)b.v[i])); }
+static inline vec v_abs(vec a) { VLOOP((int8_t)(uint8_t)(a.v[i] < 0 ? -(int)a.v[i] : a.v[i])); }
+static inline void v_stream(vec* p, vec a) { *p = a; }
+static inline vec v_minu(vec a, vec b) { VLOOP((uint8_t)a.v[i] < (uint8_t)b.v[i] ? a.v[i] : b.v[i]); }
+static inline vec v_maxu(vec a, vec b) { VLOOP((uint8_t)a.v[i] > (uint8_t)b.v[i] ? a.v[i] : b.v[i]); }
+static inline vec v_subsu(vec a, vec b)
+{
+    VLOOP((int8_t)(uint8_t)((uint8_t)a.v[i] > (uint8_t)b.v[i] ? (uint8_t)a.v[i] - (uint8_t)b.v[i] : 0));
+}
 #endif
 
 /* ---- decoder ----------------------------------------------------------- */
@@ -302,31 +321,36 @@ static int bad(const drx_ldpc* d)
 static inline __attribute__((always_inline)) vec* check_node(drx_ldpc* d, vec* bl, const uint16_t* p,
                                                               vec* pc, vec* pp, int cnt, int first)
 {
-    const vec lo = v_dup(-32), hi = v_dup(31), c127 = v_dup(127);
+    const vec lo = v_dup(-32), hi = v_dup(31), c127 = v_dup(127), one = v_dup(1);
     vec* data = d->data;
     vec inp[MAX_DEG];
-    vec min0 = c127, min1 = c127, signs = v_zero();
+    vec min0 = v_dup(-1), min1 = v_dup(-1), signs = v_zero(); /* unsigned 255 */
 #define CN_IN(c, v)                                                \
     do {                                                           \
         const vec x = first ? (v) : v_qsub((v), bl[c]);            \
-        const vec m = v_mag(x);                                    \
+        const vec a = v_abs(x);                                    \
         inp[c] = x;                                                \
-        min1 = v_min(min1, v_max(min0, m));                        \
-        min0 = v_min(min0, m);                                     \
+        min1 = v_minu(min1, v_maxu(min0, a));                      \
+        min0 = v_minu(min0, a);                                    \
         signs = v_xor(signs, x);                                   \
     } while (0)
-#define CN_OUT(c, dst)                                                                    \
-    do {                                                                                  \
-        const vec x = inp[c];                                                             \
-        const vec o = v_sign(v_other(v_mag(x), min0, min1), v_or(v_xor(signs, x), c127)); \
-        (dst) = v_qadd(x, o);                                                             \
-        bl[c] = v_min(v_max(o, lo), hi);                                                  \
+#define CN_OUT(c, dst)                                                                        \
+    do {                                                                                      \
+        const vec x = inp[c];                                                                 \
+        const vec eq = v_eq(v_abs(x), min0);                                                  \
+        const vec o = v_sign(v_max(mn0, v_and(eq, mn1)), v_or(v_xor(signs, x), c127));        \
+        (dst) = v_qadd(x, o);                                                                 \
+        bl[c] = v_min(v_max(o, lo), hi);                                                      \
     } while (0)
     for (int c = 0; c < cnt; c++)
         CN_IN(c, data[p[c]]);
     CN_IN(cnt, *pc);
     if (pp)
         CN_IN(cnt + 1, *pp);
+    /* the offset (and the cap at 127) once per node: v_mag() is monotonic,
+     * so it commutes with the minimums; an edge whose |x| is not min0 but
+     * whose v_mag() is gets mn0 instead of mn1, which are then equal */
+    const vec mn0 = v_subsu(v_minu(min0, c127), one), mn1 = v_subsu(v_minu(min1, c127), one);
     for (int c = 0; c < cnt; c++)
         CN_OUT(c, data[p[c]]);
     CN_OUT(cnt, *pc);
@@ -336,6 +360,18 @@ static inline __attribute__((always_inline)) vec* check_node(drx_ldpc* d, vec* b
 #undef CN_OUT
     return bl + cnt + 1 + (pp != NULL);
 }
+
+/* The messages are read back one iteration later only: streaming stores
+ * keep them out of the caches, left to the posteriors (reused within the
+ * iteration) of the decoders sharing the L3. */
+#ifndef LDPC_NT
+#define LDPC_NT 1
+#endif
+#if LDPC_NT
+#define BL_ST(p, v) v_stream((p), (v))
+#else
+#define BL_ST(p, v) (*(p) = (v))
+#endif
 
 /*
  * Same check node, messages stored compressed: every message of a min-sum
@@ -355,9 +391,15 @@ static inline __attribute__((always_inline)) vec* check_node_c(drx_ldpc* d, vec*
     const vec* K = d->kidx;
     vec* data = d->data;
     vec inp[MAX_DEG];
-    vec min0 = c127, min1 = c127, signs = v_zero();
-    vec m0o = min0, m1o = min1, ixo = min0, sv = min0;
+    vec min0 = v_dup(-1), min1 = v_dup(-1), signs = v_zero(); /* raw |x|, see check_node() */
+    vec m0o = c127, m1o = c127, ixo = c127, sv = c127;
     const int deg = cnt + 1 + (pp != NULL);
+#if defined(__SSE2__) && LDPC_NT
+    /* the next nodes' messages, which are not needed in the caches after */
+    _mm_prefetch((const char*)(bl + 4 * 6), _MM_HINT_NTA);
+    _mm_prefetch((const char*)(bl + 4 * 6) + 64, _MM_HINT_NTA);
+    _mm_prefetch((const char*)(bl + 4 * 6) + 128, _MM_HINT_NTA);
+#endif
     if (!first) {
         m0o = bl[0];
         m1o = bl[1];
@@ -373,10 +415,10 @@ static inline __attribute__((always_inline)) vec* check_node_c(drx_ldpc* d, vec*
             x = v_qsub(x, v_min(v_sign(mg, sv), c31));                        \
             sv = v_add(sv, sv);                                               \
         }                                                                     \
-        const vec m = v_mag(x);                                               \
+        const vec a = v_abs(x);                                               \
         inp[c] = x;                                                           \
-        min1 = v_min(min1, v_max(min0, m));                                   \
-        min0 = v_min(min0, m);                                                \
+        min1 = v_minu(min1, v_maxu(min0, a));                                 \
+        min0 = v_minu(min0, a);                                               \
         signs = v_xor(signs, x);                                              \
     } while (0)
     for (int c = 0; c < cnt; c++)
@@ -385,18 +427,19 @@ static inline __attribute__((always_inline)) vec* check_node_c(drx_ldpc* d, vec*
     if (pp)
         CN_IN(cnt + 1, *pp);
 #undef CN_IN
+    const vec mn0 = v_subsu(v_minu(min0, c127), one), mn1 = v_subsu(v_minu(min1, c127), one);
     vec ix = v_zero(), acc = v_zero();
 #define CN_OUT(c, dst)                                                        \
     do {                                                                      \
         const vec x = inp[c];                                                 \
-        const vec eq = v_eq(v_mag(x), min0);                                  \
+        const vec eq = v_eq(v_abs(x), min0);                                  \
         const vec sx = v_xor(signs, x);                                       \
-        const vec o = v_sign(v_max(min0, v_and(eq, min1)), v_or(sx, c127));   \
+        const vec o = v_sign(v_max(mn0, v_and(eq, mn1)), v_or(sx, c127));     \
         (dst) = v_qadd(x, o);                                                 \
         ix = v_max(ix, v_and(eq, K[c]));                                      \
         acc = v_shift_in_sign(acc, sx);                                       \
         if ((c) % SGB == SGB - 1) {                                           \
-            bl[3 + (c) / SGB] = v_add(v_add(acc, acc), one);                  \
+            BL_ST(bl + 3 + (c) / SGB, v_add(v_add(acc, acc), one));           \
             acc = v_zero();                                                   \
         }                                                                     \
     } while (0)
@@ -410,11 +453,11 @@ static inline __attribute__((always_inline)) vec* check_node_c(drx_ldpc* d, vec*
         acc = v_add(v_add(acc, acc), one);
         for (int r = deg % SGB; r < SGB; r++)
             acc = v_add(acc, acc);
-        bl[3 + deg / SGB] = acc;
+        BL_ST(bl + 3 + deg / SGB, acc);
     }
-    bl[0] = v_min(min0, c32);
-    bl[1] = v_min(min1, c32);
-    bl[2] = ix;
+    BL_ST(bl, v_min(mn0, c32));
+    BL_ST(bl + 1, v_min(mn1, c32));
+    BL_ST(bl + 2, ix);
     return bl + 3 + (deg + SGB - 1) / SGB;
 }
 
@@ -458,6 +501,9 @@ static void update_c(drx_ldpc* d)
     vec* bl = d->bnl;
     for (int i = 0; i < d->q; i++)
         bl = layer(d, bl, i, d->cnc[i], 0, 1);
+#if defined(__SSE2__) && LDPC_NT
+    _mm_sfence();
+#endif
 }
 
 static void update_first_c(drx_ldpc* d)
@@ -465,6 +511,9 @@ static void update_first_c(drx_ldpc* d)
     vec* bl = d->bnl;
     for (int i = 0; i < d->q; i++)
         bl = layer(d, bl, i, d->cnc[i], 1, 1);
+#if defined(__SSE2__) && LDPC_NT
+    _mm_sfence();
+#endif
 }
 
 /* ---- frame <-> lane reordering ------------------------------------------ */

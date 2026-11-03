@@ -30,7 +30,11 @@ typedef struct {
     double bandwidth;   /* DVB-T: channel bandwidth, Hz */
     int dvbt2;          /* 1: DVB-T2 (same settings as DVB-T; rx.isi selects
                          * the PLP, DRX_ISI_FIRST / DRX_ISI_ALL the first) */
-    int ldpc_threads;   /* LDPC decoder threads */
+    int ldpc_threads;   /* decoder threads (demapping and LDPC) */
+    int demap_threads;  /* of which demap only: -1 auto (1 of 4, 2 of 5 or
+                         * more: more than 3 LDPC decoders contend for the
+                         * L3 cache), 0 demapping in the LDPC workers;
+                         * >= 0: in addition to ldpc_threads */
     int max_latency_ms; /* send an incomplete LDPC batch after this long */
 } drx_mt_cfg;
 
