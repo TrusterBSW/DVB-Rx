@@ -22,7 +22,9 @@ typedef struct {
     int dvbs;           /* 1: DVB-S (first generation) instead of DVB-S2 */
     int dvbs_rate;      /* enum drx_dvbs_rate, DRX_DVBS_AUTO to detect it */
     int dvbc;           /* 1: DVB-C instead of DVB-S2 (roll-off 0.15) */
-    int dvbc_qam;       /* enum drx_qam, DRX_QAM_AUTO to detect it */
+    int dvbc_qam;       /* enum drx_qam, DRX_QAM_AUTO to detect it (else
+                         * tried first, then the others) */
+    int dvbc_inversion; /* enum fe_spectral_inversion: 0, 1, 2 auto */
     int dvbt;           /* 1: DVB-T (OFDM: the front-end and the fe settings
                          * are not used) */
     double sample_rate; /* DVB-T: input sample rate, Hz (at least 8/7 of the

@@ -861,6 +861,7 @@ static void rx_cfg_for(const struct bridge* b, const struct dvbrx_tune* t, doubl
     if (t->delivery_system == SYS_DVBC_ANNEX_A) {
         cfg->dvbc = 1;
         cfg->dvbc_qam = qam_of(t->modulation);
+        cfg->dvbc_inversion = t->inversion <= 2 ? (int)t->inversion : 2;
     }
 }
 

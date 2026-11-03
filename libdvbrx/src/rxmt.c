@@ -114,6 +114,7 @@ void drx_mt_cfg_default(drx_mt_cfg* cfg, float sps, float rolloff)
     cfg->dvbs_rate = 0;
     cfg->dvbc = 0;
     cfg->dvbc_qam = 0;
+    cfg->dvbc_inversion = 2;
     cfg->dvbt = 0;
     cfg->sample_rate = 0;
     cfg->bandwidth = 0;
@@ -641,6 +642,8 @@ drx_mt* drx_mt_new(const drx_mt_cfg* cfg, drx_ts_cb cb, void* ctx)
         mt->dvbs = drx_dvbs_new((enum drx_dvbs_rate)cfg->dvbs_rate, 1);
     if (cfg->dvbc)
         mt->dvbc = drx_dvbc_new((enum drx_qam)cfg->dvbc_qam);
+    if (mt->dvbc)
+        drx_dvbc_set_inversion(mt->dvbc, cfg->dvbc_inversion);
     /* in-place resampling needs at most one output per input */
     if (cfg->dvbt && cfg->sample_rate >= cfg->bandwidth * 8 / 7)
         mt->dvbt = drx_dvbt_new(cfg->sample_rate, cfg->bandwidth, 1);

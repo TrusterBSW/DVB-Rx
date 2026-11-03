@@ -18,6 +18,21 @@ T, T2, C et le frontal.
 - **DVB-C** : validé en radio avec le B210 en émission (256-QAM à 31 dB,
   le 3/11/2026). Reste un cas sur le réseau câble réel (SFR).
 
+## Scan
+
+- **Page web de scan du câble** (et de l'antenne) : balayage de bande SDR
+  (fenêtres de 56 MHz, classement QAM/OFDM par la raie cyclique et le
+  préfixe cyclique, estimation du débit symbole), puis accrochage et lecture
+  des tables (NIT, SDT) pour sortir les fréquences et les paramètres DVB-C,
+  T et T2 (et **DAB** en bande III, 174-240 MHz : nouveau démodulateur OFDM
+  1,536 MHz à écrire), avec un **fichier de multiplex pour tvheadend** (ou
+  dvbv5). Base existante : `~/bandscan.py` sur l'hôte (premier balayage SFR :
+  `work/cable-sfr.txt`). Le service doit libérer le B210 pendant le balayage
+  (ou le hub doit exposer un mode scan). Charge : 2-3 jours sans DAB, plus
+  2-4 jours pour un démodulateur DAB.
+- Le DVB-C gère maintenant l'inversion spectrale (auto) et prend la
+  modulation demandée comme un indice (fréquent sur les listes anciennes).
+
 ## Matériel radio
 
 État actuel : seul UHD (B200/B210, dont le clone LibreSDR) est géré.

@@ -239,21 +239,48 @@ struct drx_dvbc {
     int sync_failures;      /* packet sync searches failed since then */
     uint64_t resyncs;
     double shift;
+
+    int inv, inv_mode; /* conjugated input; 0 normal, 1 inverted, 2 auto */
+    cf* cbuf;          /* conjugated input block */
 };
 
+#define CONJ_BLK 4096
+
 static const int AUTO_ORDER[] = { 64, 256, 128, 32, 16 };
+
+/* Constellation of attempt i: the requested one first (a hint: scan lists
+ * are often out of date, e.g. 64-QAM for multiplexes now in 256-QAM),
+ * then the others in AUTO_ORDER. */
+static int qam_try(const drx_dvbc* d, int i)
+{
+    if (d->want == DRX_QAM_AUTO)
+        return AUTO_ORDER[i];
+    if (i == 0)
+        return (int)d->want;
+    int k = 0;
+    for (int j = 0; j < 5; j++)
+        if (AUTO_ORDER[j] != (int)d->want && ++k == i)
+            return AUTO_ORDER[j];
+    return AUTO_ORDER[0];
+}
 
 static void start_acq(drx_dvbc* d, int failed)
 {
     if (failed) {
         d->resyncs++;
-        if (d->want == DRX_QAM_AUTO) {
-            d->try_idx = (d->try_idx + 1) % 5;
-            make_qam(&d->q, AUTO_ORDER[d->try_idx]);
-        }
+        d->try_idx = (d->try_idx + 1) % 5;
+        make_qam(&d->q, qam_try(d, d->try_idx));
+        if (d->try_idx == 0 && d->inv_mode == 2) /* every constellation failed */
+            d->inv ^= 1;
     }
     d->state = ST_ACQ;
     d->nacq = 0;
+}
+
+void drx_dvbc_set_inversion(drx_dvbc* d, int mode)
+{
+    d->inv_mode = mode == 0 || mode == 1 ? mode : 2;
+    d->inv = d->inv_mode == 1;
 }
 
 drx_dvbc* drx_dvbc_new(enum drx_qam qam)
@@ -270,11 +297,13 @@ drx_dvbc* drx_dvbc_new(enum drx_qam qam)
         return NULL;
     memset(d, 0, size);
     d->want = qam;
-    make_qam(&d->q, qam == DRX_QAM_AUTO ? AUTO_ORDER[0] : (int)qam);
+    make_qam(&d->q, qam_try(d, 0));
+    d->inv_mode = 2;
+    d->cbuf = malloc(sizeof(cf) * CONJ_BLK);
     d->acq = malloc(sizeof(cf) * ACQ_LEN);
     d->spec = malloc(sizeof(cf) * ACQ_LEN);
     d->bits = malloc(BITBUF + 8); /* + 8: whole-word stores of each symbol's bits */
-    if (!d->acq || !d->spec || !d->bits || outer_init(&d->outer) || fft_init(&d->fft, ACQ_LEN)) {
+    if (!d->cbuf || !d->acq || !d->spec || !d->bits || outer_init(&d->outer) || fft_init(&d->fft, ACQ_LEN)) {
         drx_dvbc_free(d);
         return NULL;
     }
@@ -297,12 +326,15 @@ void drx_dvbc_free(drx_dvbc* d)
     free(d->spec);
     free(d->acq);
     free(d->bits);
+    free(d->cbuf);
     free(d);
 }
 
+/* omega is the carrier of the stream as processed, i.e. conjugated when
+ * inverted: the upstream shifts and the reported frequency change sign. */
 void drx_dvbc_shift(drx_dvbc* d, double delta)
 {
-    d->omega -= 2 * M_PI * delta;
+    d->omega -= (d->inv ? -2 : 2) * M_PI * delta;
     d->shift += delta;
 }
 
@@ -312,7 +344,8 @@ void drx_dvbc_get_stats(const drx_dvbc* d, drx_dvbc_stats* s)
     s->locked = d->state == ST_DD && d->outer.synced;
     s->qam = d->state == ST_DD ? d->q.qam : 0;
     s->snr_db = 10.0f * log10f(1.0f / (d->err + 1e-20f));
-    s->freq = (float)(d->omega / (2 * M_PI) + d->shift);
+    s->freq = (float)((d->inv ? -d->omega : d->omega) / (2 * M_PI) + d->shift);
+    s->inverted = d->inv;
     s->packets = d->outer.packets;
     s->rs_corrected = d->outer.rs_corrected;
     s->rs_failed = d->outer.rs_failed;
@@ -633,18 +666,18 @@ static int run_dd(drx_dvbc* d, const cf* s, int n)
     return i;
 }
 
-void drx_dvbc_process(drx_dvbc* d, const float* sym, int n, drx_dvbc_cb cb, void* ctx)
+/* Returns the symbols consumed: all of them, or fewer when the inversion
+ * hypothesis changed (the rest must be taken the other way). */
+static int process(drx_dvbc* d, const cf* s, int n)
 {
-    d->outer.cb = cb;
-    d->outer.ctx = ctx;
-    const cf* s = (const cf*)sym;
+    const int inv = d->inv;
     int i = 0;
-    while (i < n) {
+    while (i < n && d->inv == inv) {
         if (d->state == ST_ACQ) {
             while (i < n && d->nacq < ACQ_LEN)
                 d->acq[d->nacq++] = s[i++];
             if (d->nacq < ACQ_LEN)
-                return;
+                return i;
             start_cma(d);
             run_cma(d, d->acq, ACQ_LEN);
             continue;
@@ -675,5 +708,27 @@ void drx_dvbc_process(drx_dvbc* d, const float* sym, int n, drx_dvbc_cb cb, void
                 start_acq(d, 1);
             }
         }
+    }
+    return i;
+}
+
+void drx_dvbc_process(drx_dvbc* d, const float* sym, int n, drx_dvbc_cb cb, void* ctx)
+{
+    d->outer.cb = cb;
+    d->outer.ctx = ctx;
+    const cf* s = (const cf*)sym;
+    while (n > 0) {
+        if (!d->inv) {
+            const int k = process(d, s, n);
+            s += k;
+            n -= k;
+            continue;
+        }
+        const int m = n < CONJ_BLK ? n : CONJ_BLK;
+        for (int k = 0; k < m; k++)
+            d->cbuf[k] = conjf(s[k]);
+        const int k = process(d, d->cbuf, m);
+        s += k;
+        n -= k;
     }
 }
