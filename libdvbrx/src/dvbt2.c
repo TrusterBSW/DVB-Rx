@@ -619,6 +619,8 @@ struct drx_dvbt2 {
 
     struct p1tab p1;
     double complex *p1c1, *p1c2; /* find_p1 prefix sums */
+    double complex *p1c1i, *p1c2i; /* the same for an inverted spectrum */
+    int inv; /* input conjugated: spectrum inverted (cable networks) */
     double* p1e;
     struct fft fft1k, fft;
     cf* win; /* FFT buffer, 32K */
@@ -722,10 +724,12 @@ drx_dvbt2* drx_dvbt2_new(double sample_rate, double bandwidth, int plp_id)
     d->p1c1 = malloc(sizeof(double complex) * (P1_SCAN + P1_LEN + 1));
     d->p1c2 = malloc(sizeof(double complex) * (P1_SCAN + P1_LEN + 1));
     d->p1e = malloc(sizeof(double) * (P1_SCAN + P1_LEN + 1));
+    d->p1c1i = malloc(sizeof(double complex) * (P1_SCAN + P1_LEN + 1));
+    d->p1c2i = malloc(sizeof(double complex) * (P1_SCAN + P1_LEN + 1));
     d->bb = drx_bbdec_new();
     d->ts = malloc(64800 / 8 + 188);
     d->bbframe = malloc(64800 / 8);
-    int ok = d->p1c1 && d->p1c2 && d->p1e && d->buf && d->win && d->x && d->hk && d->hd && d->hc && d->h2 &&
+    int ok = d->p1c1 && d->p1c2 && d->p1e && d->p1c1i && d->p1c2i && d->buf && d->win && d->x && d->hk && d->hd && d->hc && d->h2 &&
              d->grid && d->hcp && d->cpp && d->bb && d->ts && d->bbframe;
     ok = ok && !resamp_init(&d->rs, d->step_nominal, 0.86) && !fft_init(&d->fft1k, 1024);
     ok = ok && !drx_fec_lookup(1, "1_4", &d->fec_pre) && !drx_fec_lookup(1, "1_2", &d->fec_post);
@@ -818,6 +822,8 @@ void drx_dvbt2_free(drx_dvbt2* d)
     free_layout(&d->L);
     free(d->p1c1);
     free(d->p1c2);
+    free(d->p1c1i);
+    free(d->p1c2i);
     free(d->p1e);
     free(d->buf);
     free(d->win);
@@ -903,32 +909,53 @@ static int find_p1(drx_dvbt2* d, int scan)
     const int ns = avail < scan ? avail : scan;
     const cf* x = d->buf + d->pos;
     /* prefix sums of the shift-compensated lag products and of the energy */
-    double complex *c1 = d->p1c1, *c2 = d->p1c2;
+    double complex *c1 = d->p1c1, *c2 = d->p1c2, *c1i = d->p1c1i, *c2i = d->p1c2i;
     double* e = d->p1e;
-    c1[0] = c2[0] = 0;
+    c1[0] = c2[0] = c1i[0] = c2i[0] = 0;
     e[0] = 0;
     const int m = ns + P1_LEN;
     for (int i = 0; i < m; i++) {
         const cf r = d->p1.rot[i & 1023];
-        c1[i + 1] = c1[i] + (i + P1_C < d->nbuf - d->pos ? x[i] * conjf(x[i + P1_C]) * r : 0);
-        c2[i + 1] = c2[i] + (i >= P1_B ? x[i] * conjf(x[i - P1_B]) * r : 0);
+        const cf p1 = i + P1_C < d->nbuf - d->pos ? x[i] * conjf(x[i + P1_C]) : 0;
+        const cf p2 = i >= P1_B ? x[i] * conjf(x[i - P1_B]) : 0;
+        c1[i + 1] = c1[i] + p1 * r;
+        c2[i + 1] = c2[i] + p2 * r;
+        /* inverted spectrum: the frequency shifts of the C and B parts
+         * turn the other way */
+        c1i[i + 1] = c1i[i] + p1 * conjf(r);
+        c2i[i + 1] = c2i[i] + p2 * conjf(r);
         e[i + 1] = e[i] + crealf(x[i] * conjf(x[i]));
     }
-    int best = -1;
+    int best = -1, best_inv = 0;
     float bv = P1_MIN;
     for (int s = 0; s < ns; s++) {
-        const double complex S1 = c1[s + P1_C] - c1[s];
-        const double complex S2 = c2[s + P1_LEN] - c2[s + 1566];
         const double en = (e[s + P1_LEN] - e[s]) * (double)(P1_C + P1_B) / P1_LEN;
-        const double a1 = sqrt(creal(S1) * creal(S1) + cimag(S1) * cimag(S1));
-        const double a2 = sqrt(creal(S2) * creal(S2) + cimag(S2) * cimag(S2));
-        const float v = (float)((a1 + a2) / (en + 1e-30));
-        if (v > bv) {
-            bv = v;
-            best = s;
-        } else if (best >= 0 && s > best + 1024) {
-            break;
+        for (int iv = 0; iv < 2; iv++) {
+            const double complex* a = iv ? c1i : c1;
+            const double complex* b = iv ? c2i : c2;
+            const double complex S1 = a[s + P1_C] - a[s];
+            const double complex S2 = b[s + P1_LEN] - b[s + 1566];
+            const double a1 = sqrt(creal(S1) * creal(S1) + cimag(S1) * cimag(S1));
+            const double a2 = sqrt(creal(S2) * creal(S2) + cimag(S2) * cimag(S2));
+            const float v = (float)((a1 + a2) / (en + 1e-30));
+            if (v > bv) {
+                bv = v;
+                best = s;
+                best_inv = iv;
+            }
         }
+        if (best >= 0 && s > best + 1024)
+            break;
+    }
+    if (best >= 0 && best_inv) {
+        /* the P1 shows on the conjugated input: conjugate what is buffered
+         * and what comes next, then look again (now the normal way) */
+        for (int i = d->pos; i < d->nbuf; i++)
+            d->buf[i] = conjf(d->buf[i]);
+        d->inv ^= 1;
+        if (t2_debug())
+            fprintf(stderr, "t2: spectrum %s\n", d->inv ? "inverted" : "normal");
+        return find_p1(d, scan);
     }
     if (best >= 0) {
         const double complex S1 = c1[best + P1_C] - c1[best];
@@ -2468,6 +2495,8 @@ static int acquire(drx_dvbt2* d)
         }
         /* carrier mode: energy of the extended carriers in the first P2 */
         d->pos = s + P1_LEN;
+        if (t2_debug())
+            fprintf(stderr, "t2: guard %d/%d, f %.7f, P2 at %d\n", GI_NUM[d->guard_idx], GI_DEN[d->guard_idx], d->f, d->pos);
         d->phase = -2 * M_PI * d->f * d->pos;
         int ext = 0;
         if (d->n >= 8192) {
@@ -2611,6 +2640,9 @@ void drx_dvbt2_demod(drx_dvbt2* d, const float* x, int n, double step, drx_dvbt2
     if (reserve(d, n))
         return;
     memcpy(d->buf + d->nbuf, x, sizeof(cf) * n);
+    if (d->inv)
+        for (int i = 0; i < n; i++)
+            d->buf[d->nbuf + i] = conjf(d->buf[d->nbuf + i]);
     d->nbuf += n;
     run(d);
 }
@@ -2623,7 +2655,11 @@ void drx_dvbt2_process(drx_dvbt2* d, const float* iq, int n, drx_dvbt2_cb cb, vo
     if (reserve(d, room))
         return;
     double step;
-    d->nbuf += drx_dvbt2_resample(d, iq, n, (float*)(d->buf + d->nbuf), d->cap - d->nbuf, &step);
+    const int got = drx_dvbt2_resample(d, iq, n, (float*)(d->buf + d->nbuf), d->cap - d->nbuf, &step);
+    if (d->inv)
+        for (int i = 0; i < got; i++)
+            d->buf[d->nbuf + i] = conjf(d->buf[d->nbuf + i]);
+    d->nbuf += got;
     set_step(d, step);
     run(d);
 }
