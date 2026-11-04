@@ -123,6 +123,9 @@ Démarrage :
  "symbol_rate": 27500000, "rolloff": 0.2}
 ```
 
+Terrestre (antenne TNT) : `{"cmd": "monitor", "action": "start", "delsys": "DVB-T", "freq": 586000000,
+"bandwidth": 8000000, "plp": -1}` (`DVB-T2` : `plp` -1 pour le premier PLP).
+
 Arrêt : `{"cmd": "monitor", "action": "stop"}`
 
 - **Fonctionnement** : la commande garde un récepteur sur cette porteuse jusqu'à `stop`. Il est visible dans `status` comme

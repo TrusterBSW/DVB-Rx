@@ -102,9 +102,14 @@ class DvbrxClient:
             req["force"] = True
         return self.call(req, timeout=10.0)
 
-    def monitor_start(self, delsys, freq, symbol_rate, rolloff, antenna=None, force=False):
+    def monitor_start(self, delsys, freq, symbol_rate, rolloff, antenna=None, force=False,
+                      bandwidth=None, plp=None):
         req = {"cmd": "monitor", "action": "start", "delsys": delsys, "freq": int(round(freq)),
                "symbol_rate": int(round(symbol_rate)), "rolloff": rolloff}
+        if bandwidth:
+            req["bandwidth"] = int(bandwidth)
+        if plp is not None:
+            req["plp"] = int(plp)
         if antenna:
             req["antenna"] = antenna
         if force:

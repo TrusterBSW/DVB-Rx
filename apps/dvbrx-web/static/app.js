@@ -246,7 +246,7 @@ function renderStatus(st) {
 
   const ban = [];
   if (st.web_scan) ban.push(`<div class="banner warn">Scan ${st.web_scan.mode === 'full' ? 'complet' : 'rapide'} en cours : ${esc(st.web_scan.message)}</div>`);
-  if (st.web_monitor) ban.push('<div class="banner warn">Alignement satellite en cours (le récepteur est réservé).</div>');
+  if (st.web_monitor) ban.push(`<div class="banner warn">Alignement ${['DVB-T', 'DVB-T2'].includes(st.web_monitor.delsys) ? 'terrestre' : 'satellite'} en cours (le récepteur est réservé).</div>`);
   $('#statusBanner').innerHTML = ban.join('');
 }
 
@@ -794,9 +794,18 @@ TAB_HOOKS.full = {
   leave() { if (!(S.job && S.job.state === 'running')) stopLoop('job'); },
 };
 
-/* ------------------------------------------------------------------ Alignement satellite */
+/* ------------------------------------------------------------------ Alignement (satellite ou terrestre) */
+
+const UHF = { first: 21, last: 69 }; // canal N : 306 + 8 N MHz (Europe, 8 MHz)
+const uhfChannel = (f) => { const n = Math.round((f / 1e6 - 306) / 8); return n >= UHF.first && n <= UHF.last && Math.abs(f / 1e6 - 306 - 8 * n) < 1 ? n : null; };
 
 function alParams() {
+  if ($('#alMode').value === 'ter') {
+    const f = parseFloat($('#alTFreq').value) * 1e6;
+    const plp = parseInt($('#alTPlp').value, 10);
+    return { mode: 'ter', rf: f, delsys: $('#alTDelsys').value, bw: parseInt($('#alTBw').value, 10),
+             plp: isNum(plp) && plp >= 0 ? plp : -1, ok: isNum(f) && f >= 47e6 && f <= 1000e6 };
+  }
   const unit = $('#alUnit').value;
   const v = parseFloat($('#alFreq').value);
   const tone = $('#alTone').checked;
@@ -806,12 +815,21 @@ function alParams() {
   let rf, iff;
   if (unit === 'rf') { rf = v * 1e9; iff = rf - lo; } else { iff = v * 1e6; rf = iff + lo; }
   const rsk = parseFloat($('#alRs').value);
-  return { rf, iff, lo, tone, volt, rs: isNum(rsk) && rsk > 0 ? rsk * 1e3 : 0, delsys: $('#alDelsys').value, ok: isNum(v) };
+  return { mode: 'sat', rf, iff, lo, tone, volt, rs: isNum(rsk) && rsk > 0 ? rsk * 1e3 : 0, delsys: $('#alDelsys').value, ok: isNum(v) };
 }
 
 function alCalc() {
   if (!S.cfg) return;
   const p = alParams();
+  const ter = p.mode === 'ter';
+  $('#alTerCtl').hidden = !ter;
+  $('#alSatCtl').hidden = ter;
+  $('#alLnbRow').hidden = ter;
+  if (ter) {
+    const n = p.ok ? uhfChannel(p.rf) : null;
+    $('#alTCalc').textContent = !p.ok ? 'fréquence ? (47–1000 MHz)' : n ? `canal UHF ${n}` : 'hors grille UHF (VHF ou décalage)';
+    return;
+  }
   const L = S.cfg.lnb;
   let t = `réelle ${ghz(p.rf, 4)} · FI ${mhz(p.iff, 1)} · OL ${num(p.lo / 1e6, 0)} MHz`;
   const sat = S.cfg.sat;
@@ -824,7 +842,10 @@ function alCalc() {
 async function alStart(force = false) {
   const p = alParams();
   if (!p.ok) { toast('Fréquence invalide', true); return; }
-  const body = { s: S.sock, delsys: p.delsys, freq: Math.round(p.iff), symbol_rate: Math.round(p.rs), volt: p.volt, tone: p.tone, force: force || (S.mon && S.mon.force) || false };
+  const force_ = force || (S.mon && S.mon.force) || false;
+  const body = p.mode === 'ter'
+    ? { s: S.sock, delsys: p.delsys, freq: Math.round(p.rf), bandwidth: p.bw, plp: p.plp, force: force_ }
+    : { s: S.sock, delsys: p.delsys, freq: Math.round(p.iff), symbol_rate: Math.round(p.rs), volt: p.volt, tone: p.tone, force: force_ };
   try {
     const r = await api('/api/monitor/start', body);
     const fresh = !S.mon;
@@ -833,7 +854,12 @@ async function alStart(force = false) {
     if (fresh) S.hist = [];
     $('#alStart').textContent = 'Appliquer';
     $('#alStop').disabled = false;
-    $('#alState').textContent = `en cours : FI ${mhz(p.iff, 1)}, ${p.rs ? kbd(p.rs) : 'niveau seul (débit inconnu)'}`;
+    if (p.mode === 'ter') {
+      const n = uhfChannel(p.rf);
+      $('#alState').textContent = `en cours : ${mhz(p.rf, 3)}${n ? ` (canal ${n})` : ''}, ${p.delsys} ${num(p.bw / 1e6, 0)} MHz`;
+    } else {
+      $('#alState').textContent = `en cours : FI ${mhz(p.iff, 1)}, ${p.rs ? kbd(p.rs) : 'niveau seul (débit inconnu)'}`;
+    }
     if (r.lnb_error) toast(`LNB : ${r.lnb_error}`, true);
     startLoop('align', alTick, 500);
   } catch (e) {
@@ -904,7 +930,7 @@ async function alTick() {
   $('[data-gain]', gl).textContent = isNum(gain) ? num(gain, 0) : '—';
   setMeter(gl, isNum(lvl) ? (lvl + 60) / 60 : 0);
   $('[data-v]', gs).textContent = snr !== null ? num(snr, 1) : '—';
-  $('[data-mod]', gs).textContent = [ch.modulation, ch.code_rate, ch.delsys].filter((x) => x).join(' · ') || (S.mon && !S.mon.params.rs ? 'débit symbole non donné : niveau seul' : '—');
+  $('[data-mod]', gs).textContent = [ch.modulation, ch.code_rate, ch.delsys].filter((x) => x).join(' · ') || (S.mon && S.mon.params.mode === 'sat' && !S.mon.params.rs ? 'débit symbole non donné : niveau seul' : '—');
   setMeter(gs, snr !== null ? snr / 20 : 0);
   gk.classList.toggle('ok', !!ch.locked);
   gk.classList.toggle('bad', !ch.locked);
@@ -1042,6 +1068,23 @@ function bind() {
   // contrôle manuel de la combinaison : appliqué tout de suite pendant l'alignement
   $('#alTone').addEventListener('change', () => { if (S.mon) alStart(); });
   $$('input[name=alVolt]').forEach((i) => i.addEventListener('change', () => { if (S.mon) alStart(); }));
+  // terrestre : fréquence <-> canal UHF
+  $('#alMode').onchange = () => {
+    try { localStorage.setItem('dvbrxweb.alMode', $('#alMode').value); } catch (e) { /* rien */ }
+    alCalc();
+    if (S.mon) alStart();
+  };
+  $('#alTFreq').addEventListener('input', () => {
+    const n = uhfChannel(parseFloat($('#alTFreq').value) * 1e6);
+    $('#alTCh').value = n || '';
+    alCalc();
+  });
+  $('#alTCh').addEventListener('input', () => {
+    const n = parseInt($('#alTCh').value, 10);
+    if (n >= UHF.first && n <= UHF.last) $('#alTFreq').value = 306 + 8 * n;
+    alCalc();
+  });
+  ['#alTDelsys', '#alTBw', '#alTPlp'].forEach((s) => $(s).addEventListener('change', alCalc));
   $('#alStart').onclick = () => alStart();
   $('#alStop').onclick = () => alStop();
   $('#alSpan').onchange = drawHist;
@@ -1078,6 +1121,7 @@ async function init() {
   try { sat = localStorage.getItem('dvbrxweb.sat') === '1'; } catch (e) { /* rien */ }
   $$('.satToggle').forEach((i) => { i.checked = sat; });
   satToggleSync($('#quickSat'));
+  try { if (localStorage.getItem('dvbrxweb.alMode') === 'ter') $('#alMode').value = 'ter'; } catch (e) { /* rien */ }
   alCalc();
   const want = (location.hash || '').slice(1);
   S.tab = '';

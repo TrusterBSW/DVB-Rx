@@ -1685,6 +1685,7 @@ static void ctl_request(const char* req, struct sbuf* o)
         if (!strcmp(cmd, "monitor") && sr <= 0 && !strstr(req, "DVB-T")) {
             /* level only: the radio at the frequency, samples discarded */
             b->mode = 2;
+            ctl_last_status = now();
             b->tune = (struct dvbrx_tune){ .delivery_system = SYS_DVBS2,
                                            .frequency_khz = (uint32_t)llround(json_num(req, "freq", 0) / 1e3) };
             b->radio->bw_need = 4e6;
@@ -1704,6 +1705,7 @@ static void ctl_request(const char* req, struct sbuf* o)
             return;
         }
         b->mode = !strcmp(cmd, "probe") ? 1 : 2;
+        ctl_last_status = now(); /* the monitor watchdog counts from its start */
         b->psi = b->mode == 1 ? psi_new() : NULL;
         bridge_tune(b, &t);
         b->radio->antenna = ant0;

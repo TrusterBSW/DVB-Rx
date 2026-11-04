@@ -13,7 +13,7 @@ dépendance externe ni CDN.
 | Constellation | nuage de points avec persistance ; demandé toutes les 500 ms seulement si l'onglet est affiché et la page visible | non |
 | Scan rapide | FFT par fenêtres d’environ 50 MHz (48 utiles) (56 MS/s), détection des canaux (grille de 8 MHz pour le câble, porteuses pour le satellite) ; Sat ON = 4 combinaisons du LNB universel (VL, VH, HL, HH), soit 5 lignes | oui |
 | Scan complet | identification de la norme (raie cyclique de \|x\|² → porteuse unique, sinon OFDM) puis `probe` ; DOCSIS reconnu (6,952 MBd sans PAT ni service) ; NIT exploitée ; export dvbv5 | oui |
-| Alignement satellite | moniteur sur une porteuse, combinaison du LNB réglable à la main, grandes jauges (puissance, SNR, verrouillage), historique, son facultatif | oui |
+| Alignement (satellite ou terrestre) | moniteur sur une porteuse satellite (combinaison du LNB réglable à la main) ou un multiplex DVB-T/T2 (fréquence ou canal UHF, largeur, PLP), grandes jauges (puissance, SNR, verrouillage), historique, son facultatif | oui |
 
 Quand tvheadend utilise le récepteur, dvbrx répond `busy` : la page l'explique et propose de
 forcer (l'accord en cours est interrompu).

@@ -230,6 +230,20 @@ class Handler(BaseHTTPRequestHandler):
                 if sc.running():
                     raise DvbrxError("un scan est en cours sur ce récepteur : attendez sa fin ou annulez-le")
                 ds = body.get("delsys") or "DVB-S2"
+                if ds in ("DVB-T", "DVB-T2"):  # antenne terrestre : pas de LNB
+                    freq = float(body.get("freq") or 0)
+                    if not (47e6 <= freq <= 1000e6):
+                        raise DvbrxError(f"fréquence hors bande terrestre : {freq / 1e6:.1f} MHz")
+                    bw = int(body.get("bandwidth") or 8000000)
+                    if bw not in (6000000, 7000000, 8000000):
+                        raise DvbrxError(f"largeur invalide : {bw}")
+                    plp = body.get("plp")
+                    plp = int(plp) if plp not in (None, "") and int(plp) >= 0 else -1
+                    sk["client"].monitor_start(ds, freq, 0, 0, bandwidth=bw, plp=plp,
+                                               antenna=app.cfg.antenna_cable, force=bool(body.get("force")))
+                    sk["monitor"] = {"delsys": ds, "freq": freq, "bandwidth": bw, "plp": plp,
+                                     "volt": None, "tone": None, "started": time.time()}
+                    return self.send_json({"ok": True, "monitor": sk["monitor"], "lnb_error": None})
                 if ds not in ("DVB-S", "DVB-S2"):
                     raise DvbrxError("norme invalide pour l'alignement")
                 freq = float(body.get("freq") or 0)
