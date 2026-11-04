@@ -1013,7 +1013,9 @@ function soundStop() {
 
 TAB_HOOKS.align = {
   enter() { alCalc(); drawHist(); if (S.mon) startLoop('align', alTick, 500); },
-  leave() { if (S.mon) alStop(true); },
+  // l'alignement continue sur les autres onglets (la constellation, par exemple) : seuls le
+  // bouton Arrêter et la fermeture de la page l'arrêtent ; alTick garde dvbrx informé
+  leave() { /* rien */ },
   hidden() { /* on continue (la sécurité de 30 s de dvbrx s'applique si le navigateur ralentit) */ },
 };
 

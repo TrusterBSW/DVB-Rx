@@ -1248,8 +1248,6 @@ static void store_cells(drx_dvbt2* d, const int* carriers, int nc, const int* hi
         cells[q] = xd[j];
         csi[q] = hc[j];
     }
-    if (grid && drx_tap_on(d->tap)) /* data symbols */
-        drx_tap_put(d->tap, (const float*)cells, lim, 16);
 }
 
 /* The data symbol estimates start from the channel of the last P2 symbol
@@ -2300,6 +2298,21 @@ static void decode_job(struct fecwork* d, struct fecjob* job, int max_iter)
         }
         job->err[b] = err;
         job->sig[b] = sig;
+        /* constellation: derotated points with their Q put back (a cell holds
+         * the I of one point and the delayed Q of another: shown as received,
+         * a rotated constellation fills the square) */
+        /* (several FEC threads may write it: a display, a lost point at worst) */
+        if (drx_tap_on(d->d->tap)) {
+            float z[2 * 256];
+            const int step = ncells / 256 + 1;
+            const float g = 1.0f / norm;
+            int n = 0;
+            for (int i = 0; i < ncells && n < 256; i += step, n++) {
+                z[2 * n] = ci[i] * g;
+                z[2 * n + 1] = cq[i] * g;
+            }
+            drx_tap_put(d->d->tap, z, n, 1);
+        }
         const float n0u = err / ncells + 1e-6f;
         const v8f k = vsplat(8.0f / n0u);
         /* max-log soft values (d1 - d0) / 4 of each PAM axis (2 nb levels per
