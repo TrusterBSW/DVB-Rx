@@ -17,17 +17,13 @@ T, T2, C et le frontal.
   encore revérifiées en radio).
 - **DVB-C** : validé en radio (B210 en émission : 256-QAM à 31 dB) et sur
   le câble SFR (602 MHz, 64-QAM, 28,5 dB, le 4/11/2026).
-- **DVB-T2 sur le câble SFR (586 MHz), priorité haute** : voir
-  `work/cable-sfr.txt`.
-  1. ~~Inversion spectrale du T2~~ : fait (détection au P1). Reste à le faire
-     pour le DVB-T, par sécurité.
-  2. Le L1-post ne passe pas sur ce câble. Le format est vérifié conforme à
-     la norme ; c'est la qualité de démodulation en 32K qui manque (P2
-     équivalent à environ 9-10 dB, alors que le DVB-T 8K du même câble donne
-     19-25 dB). Pistes : bruit de phase ou écart d'horloge d'échantillonnage
-     (correction dès le P2), niveau d'entrée ou entrée RX2, LNA. Capture :
-     `~/dvbrx/work/real/t586_g55.fc32` (hôte) ; détails dans
-     `work/cable-sfr.txt`.
+- **DVB-T2 sur le câble SFR (586 MHz)** : reçu depuis le 4/11/2026, avec France 2
+  UHD et Test UHD (commits 26a58cd et b21c349 : inversion, horloge mesurée par
+  l'espacement des P1, mode HEM, `-G auto:44`). Reste à améliorer : environ 1,3 %
+  de blocs FEC en échec à 25 dB (256-QAM 5/6, juste au-dessus du seuil). Pistes :
+  la saturation de l'entrée (filtre de bande, ou atténuation du DOCSIS) et le suivi
+  d'horloge et de phase sur les porteuses des bords. Faire aussi l'inversion pour
+  le DVB-T, par sécurité. Détails dans `work/cable-sfr.txt`.
 
 ## Scan
 
