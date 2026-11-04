@@ -33,6 +33,7 @@
 #include <complex.h>
 #include <math.h>
 #include <pthread.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -50,6 +51,7 @@ typedef float complex cf;
 #define PILOT_MIN 0.25f         /* normalised continual pilot correlation */
 #define KF 0.1                  /* carrier loop gain, per symbol */
 #define CLOCK_ACQ 24            /* symbols of clock acquisition before decoding */
+#define H_SMOOTH 0.25f          /* channel estimate smoothing, per pilot update */
 
 enum { ST_DETECT, ST_INTCFO, ST_TRACK };
 
@@ -338,7 +340,20 @@ struct drx_dvbt {
     _Atomic uint64_t decoded;
 
     uint64_t symbols, resyncs;
+    /* DRX_T_DEBUG trace */
+    float dbg_psi, dbg_rho, dbg_res, dbg_err, dbg_sig;
+    int dbg_adj;
 };
+
+static int t_debug(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        const char* e = getenv("DRX_T_DEBUG");
+        v = e && *e && *e != '0';
+    }
+    return v;
+}
 
 static void* back_thread(void* arg)
 {
@@ -980,6 +995,8 @@ __attribute__((noinline)) static int demap_symbol(drx_dvbt* d)
 #endif
     d->mer_err += 0.05f * (err - d->mer_err);
     d->mer_sig += 0.05f * (sig - d->mer_sig);
+    d->dbg_err = err;
+    d->dbg_sig = sig;
 
     pthread_once(&gather_once, make_gather);
 #ifdef __AVX2__
@@ -1157,6 +1174,8 @@ static void track_symbol(drx_dvbt* d)
             return;
         }
         const float psi = cargf(s);
+        d->dbg_psi = psi;
+        d->dbg_rho = rho;
         const cf derot = cexpf(-I * psi);
         for (int k = 0; k <= m->kmax; k++)
             d->x[k] *= derot;
@@ -1184,6 +1203,7 @@ static void track_symbol(drx_dvbt* d)
         const double slope = cargf(hi * conjf(lo)) / (khi / nhi - klo / nlo); /* rad per carrier */
         /* a delay of t samples turns carrier k by -2 pi k t / n */
         const double res = -slope * n / (2 * M_PI);
+        d->dbg_res = (float)res;
         /* The resampler keeps its nominal ratio (it runs ahead of us, on
          * another thread): the window follows the transmitter's clock by
          * whole samples (tau), and the clock offset is the drift. */
@@ -1203,13 +1223,38 @@ static void track_symbol(drx_dvbt* d)
         d->cp_prev[i] = d->x[m->cp[i]];
 
     /* channel estimate: continual pilots every symbol, scattered pilots of
-     * this phase */
-    for (int i = 0; i < m->ncp; i++) {
-        const int k = m->cp[i];
-        d->h3[k / 3] = d->x[k] / m->pref[k];
+     * this phase, smoothed over the symbols. Taken as they come, the pilot
+     * noise adds to the data's (about 1.2 dB of MER), and a noisy symbol
+     * spoils the three after it through its scattered pilots. A level change
+     * (an AGC step) is a common factor, seen on the continual pilots: the
+     * whole estimate takes it at once, the smoothing does not lag. */
+    {
+        const float a = H_SMOOTH;
+        const int any = d->h3_fill != 0, mine = (d->h3_fill >> d->sp) & 1;
+        if (any) {
+            cf num = 0;
+            float den = 0;
+            for (int i = 0; i < m->ncp; i++) {
+                const int k = m->cp[i];
+                const cf h = d->h3[k / 3];
+                num += d->x[k] / m->pref[k] * conjf(h);
+                den += crealf(h * conjf(h));
+            }
+            const cf c = num / (den + 1e-30f);
+            if (cabsf(c - 1) > 0.1f)
+                for (int i = 0; i <= m->kmax / 3 + 1; i++)
+                    d->h3[i] *= c;
+        }
+        for (int i = 0; i < m->ncp; i++) {
+            const int k = m->cp[i];
+            const cf v = d->x[k] / m->pref[k];
+            d->h3[k / 3] = any ? d->h3[k / 3] + a * (v - d->h3[k / 3]) : v;
+        }
+        for (int k = 3 * d->sp; k <= m->kmax; k += 12) {
+            const cf v = d->x[k] / m->pref[k];
+            d->h3[k / 3] = mine ? d->h3[k / 3] + a * (v - d->h3[k / 3]) : v;
+        }
     }
-    for (int k = 3 * d->sp; k <= m->kmax; k += 12)
-        d->h3[k / 3] = d->x[k] / m->pref[k];
     d->h3_fill |= 1 << d->sp;
     if (d->h3_fill == 15) {
         float s = 0;
@@ -1267,6 +1312,47 @@ static void track_symbol(drx_dvbt* d)
     if (d->params && d->l >= 0 && d->h3_fill == 15 && d->settled) {
         const int ns = demap_symbol(d);
         inner(d, d->soft, ns);
+        if (t_debug()) {
+            /* error per sixteenth of the band */
+            static double avg[16];
+            static long navg;
+            float be[16] = { 0 };
+            int bn[16] = { 0 };
+            const int* dk = m->data[d->l & 3];
+            const float norm = d->ax.norm, shift = d->ax.shift, amax = (float)(d->ax.nl - 1);
+            for (int q = 0; q < m->ndata; q++) {
+                const int k = dk[q];
+                const cf h = d->hk[k];
+                const float h2 = crealf(h) * crealf(h) + cimagf(h) * cimagf(h) + 1e-12f;
+                const cf z = d->x[k] * conjf(h) * (norm / h2);
+                const float ur = fabsf(crealf(z)) - shift, ui = fabsf(cimagf(z)) - shift;
+                float lr = 2 * floorf(ur * 0.5f) + 1, li = 2 * floorf(ui * 0.5f) + 1;
+                lr = lr < 1 ? 1 : lr > amax ? amax : lr;
+                li = li < 1 ? 1 : li > amax ? amax : li;
+                const int bb = k * 16 / (m->kmax + 1);
+                be[bb] += (ur - lr) * (ur - lr) + (ui - li) * (ui - li);
+                bn[bb]++;
+            }
+            const float smer = 10 * log10f((d->dbg_sig + 1e-20f) / (d->dbg_err + 1e-20f));
+            char line[400];
+            int o = 0;
+            for (int bb = 0; bb < 16; bb++) {
+                const double e = be[bb] / (bn[bb] + 1e-9);
+                const double r = navg > 100 ? 10 * log10((e + 1e-12) / (avg[bb] + 1e-12)) : 0;
+                o += snprintf(line + o, sizeof(line) - o, " %+.1f", r);
+                if (smer > 21)
+                    avg[bb] += (e - avg[bb]) * (navg < 1000 ? 1.0 / (navg + 1) : 0.001);
+            }
+            if (smer > 21)
+                navg++;
+            if (smer < 20.5)
+                fprintf(stderr, "tband %llu mer %.2f dB above normal per 1/16 band:%s\n", (unsigned long long)d->symbols, smer, line);
+            fprintf(stderr, "tdbg %llu l %d sp %d psi %+.4f rho %.3f res %+.4f tau %+.3f drift %+.5f adj %d mer %.2f f %.9f rsf %llu\n",
+                    (unsigned long long)d->symbols, d->l, d->sp, d->dbg_psi, d->dbg_rho, d->dbg_res, d->tau, d->drift,
+                    d->dbg_adj, 10 * log10f((d->dbg_sig + 1e-20f) / (d->dbg_err + 1e-20f)), d->f,
+                    (unsigned long long)d->back.outer.rs_failed);
+        }
+        d->dbg_adj = 0;
     }
     if (d->back.outer.packets != d->packets_seen) {
         d->packets_seen = d->back.outer.packets;
@@ -1371,6 +1457,7 @@ static void run(drx_dvbt* d)
         if (d->tau > 1.5 || d->tau < -1.5)
             adj = (int)lrint(d->tau);
         if (adj) {
+            d->dbg_adj = adj;
             d->tau -= adj;
             /* the window moves later: the signal sits earlier in it */
             shift_refs(d, -adj);

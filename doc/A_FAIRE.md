@@ -50,6 +50,18 @@ T, T2, C et le frontal.
 - Le DVB-C gère maintenant l'inversion spectrale (auto) et prend la
   modulation demandée comme un indice (fréquent sur les listes anciennes).
 
+- **DVB-T 578 MHz (câble SFR), pertes à 24-25 dB de SNR** (2026-11-05) : bouffées de bruit
+  large bande d'environ 1 ms (1 à 3 symboles OFDM), à environ -20 dBc et uniformes sur tout le
+  canal, aussi présentes dans les bords du canal de 8 MHz. Un symbole touché tombe à environ
+  18 dB de MER, sous le seuil du 64QAM 5/6. Le démodulateur suit bien (pilotes, phase,
+  horloge, fenêtre) et l'enveloppe ne bouge pas (pas de saturation). Une bande vide
+  (710-730 MHz) n'a pas de bouffées : ce n'est pas le bruit propre du B210. Source probable en
+  amont, sur le câble (modem câble en voie montante sur le même coaxial ? tête de réseau ?).
+  Fait : lissage de l'estimation de canal (MER +1,1 dB, pertes divisées par 1,8 sur la capture
+  de 20 s). Reste : identifier la source (couper la box SFR, filtre passe-haut 5-85 MHz devant
+  le B210). Trace : `DRX_T_DEBUG=1` (par symbole, et erreur par seizième de bande quand le
+  MER chute).
+
 ## Matériel radio
 
 État actuel : seul UHD (B200/B210, dont le clone LibreSDR) est géré.
