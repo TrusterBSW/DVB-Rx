@@ -2,10 +2,36 @@
 # Installs dvbrx: the dvbrx receiver (dvbrxd@N service), the dvbrx kernel module (DKMS),
 # the udev rule, the systemd service and an unprivileged "dvbrxd" user.
 # usage: sudo packaging/install.sh [adapters]
+#        sudo packaging/install.sh --web   (only dvbrx-web, the web supervision page;
+#                                           the dvbrx-web service is installed, not enabled)
 set -e
 cd "$(dirname "$0")/.."
-ADAPTERS=${1:-1}
 VERSION=0.1
+
+if [ "$1" = "--web" ]; then
+    getent passwd dvbrxd >/dev/null ||
+        useradd --system --home-dir /var/lib/dvbrxd --create-home --shell /usr/sbin/nologin \
+            --groups video,dialout,plugdev dvbrxd
+    python3 -c 'import numpy' || { echo "dvbrx-web needs python3-numpy" >&2; exit 1; }
+    rm -rf /usr/local/lib/dvbrx-web
+    install -d /usr/local/lib/dvbrx-web/dvbrxweb /usr/local/lib/dvbrx-web/static
+    install -m 0755 apps/dvbrx-web/dvbrx-web /usr/local/lib/dvbrx-web/dvbrx-web
+    install -m 0644 apps/dvbrx-web/dvbrxweb/*.py /usr/local/lib/dvbrx-web/dvbrxweb/
+    install -m 0644 apps/dvbrx-web/static/* /usr/local/lib/dvbrx-web/static/
+    ln -sf ../lib/dvbrx-web/dvbrx-web /usr/local/bin/dvbrx-web
+    install -D -m 0644 apps/dvbrx-web/README.md /usr/local/share/doc/dvbrx/dvbrx-web.md
+    install -D -m 0644 doc/dvbrx-web-api.md /usr/local/share/doc/dvbrx/dvbrx-web-api.md
+    install -d /etc/dvbrxd
+    [ -f /etc/dvbrxd/web.conf ] || install -m 0644 packaging/dvbrx-web.conf.example /etc/dvbrxd/web.conf
+    install -d -o dvbrxd -g video -m 0750 /var/lib/dvbrx-web
+    install -D -m 0644 packaging/dvbrx-web.service /etc/systemd/system/dvbrx-web.service
+    systemctl daemon-reload
+    echo "dvbrx-web installed (service not enabled); edit /etc/dvbrxd/web.conf, then:"
+    echo "  systemctl enable --now dvbrx-web    # http://<host>:8099/"
+    exit 0
+fi
+
+ADAPTERS=${1:-1}
 
 make -C libdvbrx build/dvbrx
 install -D -m 0755 libdvbrx/build/dvbrx /usr/local/bin/dvbrx

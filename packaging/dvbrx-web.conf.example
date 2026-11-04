@@ -1,0 +1,75 @@
+# /etc/dvbrxd/web.conf : configuration de dvbrx-web (interface web de supervision de dvbrx)
+# Format INI. Les valeurs commentées sont les valeurs par défaut.
+
+[web]
+# Adresse et port d'écoute. Il n'y a pas d'authentification : n'exposez la page qu'au
+# réseau local (ou mettez 127.0.0.1 derrière un mandataire avec authentification).
+#listen = 0.0.0.0
+#port = 8099
+# Résultats de scan (dernier scan rapide et dernier scan complet, en JSON)
+#data_dir = /var/lib/dvbrx-web
+
+[dvbrx]
+# Socket(s) de contrôle de dvbrx, un par instance dvbrxd@N : « chemin » ou « nom = chemin »,
+# séparés par des virgules ou des retours à la ligne (lignes suivantes indentées).
+# Vide : tous les /run/dvbrx/dvbrx-*.sock présents au démarrage.
+#sockets = Salon = /run/dvbrx/dvbrx-0.sock,
+#          Bureau = /run/dvbrx/dvbrx-1.sock
+#sockets = /run/dvbrx/dvbrx-0.sock
+#
+# Offset de calibration de la puissance d'entrée estimée (dB) :
+#     puissance (dBm) = niveau (dBFS) - gain (dB) + offset
+# Vide : on reprend la valeur calculée par dvbrx (option -P, 0 dB par défaut). Pour
+# calibrer, injectez un signal de puissance connue et ajustez cette valeur.
+#input_offset_db = 0
+
+[lnb]
+# LNB universel : oscillateurs bande basse / bande haute et seuil de commutation (MHz)
+#lo_low_mhz = 9750
+#lo_high_mhz = 10600
+#switch_mhz = 11700
+# temps d'établissement après un changement de tension / 22 kHz (s)
+#settle_s = 0.5
+
+[inputs]
+# Entrée du B210 utilisée pour le satellite et pour le câble/terrestre quand ils arrivent sur
+# deux entrées différentes : TX/RX ou RX2. Vide : l'entrée du service dvbrx.
+#antenna_sat = RX2
+#antenna_cable = TX/RX
+
+[cable]
+# Plage par défaut du scan câble/terrestre (MHz)
+#start_mhz = 100
+#stop_mhz = 870
+# Seuil de détection au-dessus du plancher de bruit (dB)
+#threshold_db = 6
+# Grille des canaux (MHz) et décalage de la grille (MHz, « auto » = déduit du spectre ;
+# 3 pour 123, 131… MHz, 2 pour 474, 482… MHz)
+#grid_mhz = 8
+#grid_offset_mhz = auto
+# Canaux contigus sans creux (< merge_dip_db) réunis en un bloc large (OFDM DOCSIS 3.1)
+#merge_dip_db = 1.0
+
+[sat]
+# Bande FI scannée (MHz)
+#if_start_mhz = 950
+#if_stop_mhz = 2150
+# Seuil de détection d'une porteuse au-dessus du plancher (dB) et débit symbole minimal
+#threshold_db = 4
+#min_symbol_rate = 1000000
+# Roll-off demandés au probe DVB-S2 puis DVB-S
+#rolloff_s2 = 0.20
+#rolloff_s = 0.35
+
+[scan]
+# Fenêtres du scan rapide : débit d'échantillonnage (S/s) et largeur utile (MHz)
+#rate = 56000000
+#useful_mhz = 48
+# Échantillons par fenêtre et taille de FFT (moyenne de samples/fft FFT)
+#samples = 262144
+#fft = 2048
+# Durée des probe (s) ; plus longue pour le DVB-T2 (trames de 250 ms, entrelacement)
+#probe_seconds = 6
+#probe_seconds_t2 = 8
+# Contraste minimal de la raie cyclique de |x|² pour conclure à une porteuse unique (dB)
+#cyclic_threshold_db = 15

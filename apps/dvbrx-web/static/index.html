@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dvbrx-web</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M1 13h14M3 13c1-6 2-9 5-9s4 3 5 9' stroke='%234ea1ff' stroke-width='1.6' fill='none'/%3E%3C/svg%3E">
+</head>
+<body>
+<header>
+  <div class="bar">
+    <span class="brand">dvbrx-web<small>supervision du récepteur SDR DVB</small></span>
+    <span class="spacer"></span>
+    <label id="sockSel" hidden>Récepteur <select id="sock"></select></label>
+    <span id="conn"><span class="dot"></span><span>connexion…</span></span>
+  </div>
+  <nav class="tabs" id="tabs">
+    <button data-tab="status" class="active">Statut</button>
+    <button data-tab="const">Constellation</button>
+    <button data-tab="quick">Scan rapide</button>
+    <button data-tab="full">Scan complet</button>
+    <button data-tab="align">Alignement satellite</button>
+  </nav>
+</header>
+
+<main>
+  <!-- ======================= Statut ======================= -->
+  <section class="tab active" id="tab-status">
+    <div id="statusBanner"></div>
+    <div class="card">
+      <div class="card-head"><h2>Radio</h2><span class="muted" id="radioUpd"></span></div>
+      <dl class="kv" id="radioKv"></dl>
+    </div>
+    <div class="grid" id="chanCards"></div>
+    <p class="muted">Cette page ne fait que lire l'état de dvbrx (commande <code>status</code>) : elle ne
+      perturbe pas la chaîne regardée par tvheadend.</p>
+  </section>
+
+  <!-- ======================= Constellation ======================= -->
+  <section class="tab" id="tab-const">
+    <div class="card">
+      <div class="controls">
+        <label>Adaptateur <select id="constAdapter"></select></label>
+        <label>Persistance <input type="range" id="constPersist" min="0" max="0.97" step="0.01" value="0.85"></label>
+        <label>Points <select id="constPoints"><option>1024</option><option selected>2048</option><option>4096</option></select></label>
+        <button class="btn" id="constClear">Effacer</button>
+      </div>
+      <div class="const-wrap">
+        <canvas id="constCanvas" width="560" height="560"></canvas>
+        <div class="const-side">
+          <div class="muted">Modulation</div><div class="big" id="constMod">—</div>
+          <div class="muted" style="margin-top:10px">SNR</div><div class="big" id="constSnr">—</div>
+          <div class="muted" style="margin-top:10px">Verrouillage</div><div id="constLock">—</div>
+          <p class="muted" id="constInfo"></p>
+          <p class="muted">Symboles reçus après égalisation et correction de porteuse, normalisés à une
+            puissance moyenne de 1. La capture n'est demandée à dvbrx que tant que cet onglet est affiché.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ======================= Scan rapide ======================= -->
+  <section class="tab" id="tab-quick">
+    <div class="card">
+      <div class="controls">
+        <label class="switch"><input type="checkbox" class="satToggle" id="quickSat"><span class="track"></span>
+          <span>Sat <span class="state">OFF</span></span></label>
+        <label>Câble de <input type="number" id="cableStart" min="50" max="6000" step="1"> à
+          <input type="number" id="cableStop" min="50" max="6000" step="1"> MHz</label>
+        <button class="btn primary" id="quickGo">Lancer le scan rapide</button>
+      </div>
+      <p class="muted" style="margin:0">FFT seulement, par fenêtres d'environ 50 MHz : localise les canaux sans les
+        décoder. Sat ON ajoute la bande FI 950–2150 MHz pour les 4 combinaisons du LNB universel.</p>
+    </div>
+    <div class="card jobbox" data-jobbox></div>
+    <div id="quickResult"></div>
+  </section>
+
+  <!-- ======================= Scan complet ======================= -->
+  <section class="tab" id="tab-full">
+    <div class="card">
+      <div class="controls">
+        <label class="switch"><input type="checkbox" class="satToggle" id="fullSat"><span class="track"></span>
+          <span>Sat <span class="state">OFF</span></span></label>
+        <label><input type="checkbox" id="fullRescan"> refaire le scan rapide</label>
+        <button class="btn primary" id="fullGo">Lancer le scan complet</button>
+        <span class="spacer"></span>
+        <a class="btn" id="expCable" href="#" download>Exporter câble/terrestre (dvbv5)</a>
+        <a class="btn" id="expSat" href="#" download>Exporter satellite (dvbv5)</a>
+      </div>
+      <p class="muted" style="margin:0">Pour chaque canal détecté : identification de la norme (raie cyclique au débit
+        symbole → porteuse unique, sinon OFDM), puis <code>probe</code> (DVB-C, DVB-T, DVB-T2 ; DVB-S2 puis DVB-S
+        pour le satellite). Les multiplex annoncés par la NIT sont ajoutés.</p>
+    </div>
+    <div class="card jobbox" data-jobbox></div>
+    <div id="fullResult"></div>
+  </section>
+
+  <!-- ======================= Alignement ======================= -->
+  <section class="tab" id="tab-align">
+    <div class="card">
+      <div class="controls">
+        <label>Fréquence <input type="number" id="alFreq" step="0.001" value="11.362" style="width:9em">
+          <select id="alUnit"><option value="rf">GHz réels</option><option value="if">MHz FI</option></select></label>
+        <label>Débit symbole <input type="number" id="alRs" step="1" placeholder="facultatif" style="width:8em"> kBd</label>
+        <label>Norme <select id="alDelsys"><option>DVB-S2</option><option>DVB-S</option></select></label>
+      </div>
+      <div class="controls">
+        <span>LNB</span>
+        <span class="combo">
+          <label><input type="radio" name="alVolt" value="13" checked>13 V (V)</label>
+          <label><input type="radio" name="alVolt" value="18">18 V (H)</label>
+        </span>
+        <span class="combo"><label><input type="checkbox" id="alTone">22 kHz (bande haute)</label></span>
+        <button class="btn" id="alAuto" title="22 kHz selon le seuil de commutation">Bande auto</button>
+        <span class="mono" id="alCalc"></span>
+      </div>
+      <div class="controls">
+        <button class="btn primary" id="alStart">Démarrer</button>
+        <button class="btn" id="alStop" disabled>Arrêter</button>
+        <label><input type="checkbox" id="alSound"> son (hauteur selon le SNR / niveau)</label>
+        <label>Historique <select id="alSpan"><option value="60">1 min</option><option value="300" selected>5 min</option><option value="600">10 min</option></select></label>
+        <span class="muted" id="alState"></span>
+      </div>
+    </div>
+    <div class="gauges">
+      <div class="gauge" id="gLevel">
+        <div class="label">Puissance</div>
+        <div class="value"><span data-v>—</span><span class="unit">dBFS</span></div>
+        <div class="sub"><span data-dbm>—</span> dBm <span class="est">estimation</span> · gain <span data-gain>—</span> dB</div>
+        <div class="meter"><div style="background:var(--accent)"></div></div>
+      </div>
+      <div class="gauge" id="gSnr">
+        <div class="label">SNR</div>
+        <div class="value"><span data-v>—</span><span class="unit">dB</span></div>
+        <div class="sub"><span data-mod>—</span></div>
+        <div class="meter"><div style="background:var(--ok)"></div></div>
+      </div>
+      <div class="gauge lock" id="gLock">
+        <div class="label">Verrouillage</div>
+        <div class="value" data-v>—</div>
+        <div class="sub" data-off></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-head"><h3>Historique</h3>
+        <span class="legend"><span><i style="background:var(--accent)"></i>puissance (dBFS)</span>
+          <span><i style="background:var(--ok)"></i>SNR (dB)</span>
+          <span><i style="background:var(--bad)"></i>non verrouillé</span></span></div>
+      <canvas id="alignHist"></canvas>
+    </div>
+    <p class="muted">Le récepteur reste sur la porteuse tant que cette page est ouverte ; il est libéré en quittant
+      l'onglet, et dvbrx l'arrête de lui-même 30 s après la dernière lecture d'état.</p>
+  </section>
+</main>
+
+<footer>
+  <details>
+    <summary>Évolutions possibles</summary>
+    <ul>
+      <li><b>Contrôle DiSEqC</b> : commutateurs multi-LNB (DiSEqC 1.0/1.1) et positionneurs (DiSEqC 1.2, USALS).
+        Le protocole du contrôleur de LNB le prévoit déjà (<code>DISEQC …</code>, cf. doc/lnb-protocol.md),
+        mais l'API de contrôle de dvbrx ne l'expose pas encore.</li>
+      <li>Liste des PID et de leurs débits dans <code>probe</code> (identification certaine du DOCSIS, tables).</li>
+      <li>Blind scan satellite plus fin (porteuses étroites, multistream ISI/PLS).</li>
+      <li>Envoi direct des multiplex trouvés à tvheadend (API JSON) au lieu de l'export de fichiers.</li>
+    </ul>
+  </details>
+</footer>
+
+<dialog id="busyDlg">
+  <h3>Le récepteur est occupé</h3>
+  <p>tvheadend (ou une autre application) utilise le récepteur : une chaîne est en cours de lecture ou
+    d'enregistrement.</p>
+  <p><b>Forcer</b> interrompt l'accord en cours : l'image s'arrête et un enregistrement en cours sera
+    <b>abîmé</b>. tvheadend reprendra la main à sa prochaine demande.</p>
+  <div class="actions">
+    <button class="btn" value="cancel" id="busyCancel">Annuler</button>
+    <button class="btn danger" value="force" id="busyForce">Forcer quand même</button>
+  </div>
+</dialog>
+
+<div id="toast"></div>
+<script src="app.js"></script>
+</body>
+</html>

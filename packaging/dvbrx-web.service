@@ -1,0 +1,23 @@
+[Unit]
+Description=dvbrx-web, interface web de supervision du récepteur dvbrx
+Documentation=file:///usr/local/share/doc/dvbrx/dvbrx-web.md
+After=network.target dvbrxd@0.service
+
+[Service]
+Type=simple
+User=dvbrxd
+Group=video
+ExecStart=/usr/local/bin/dvbrx-web --config /etc/dvbrxd/web.conf
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+# résultats de scan ; sockets de contrôle de dvbrx (connect() demande l'écriture)
+ReadWritePaths=/var/lib/dvbrx-web -/run/dvbrx
+
+# Service optionnel : non activé par l'installation.
+#   systemctl enable --now dvbrx-web
+[Install]
+WantedBy=multi-user.target
