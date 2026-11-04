@@ -1499,7 +1499,8 @@ static int radio_capture(struct radio* r, double freq, double rate, double gain,
         while (got < want) {
             size_t k = 0;
             void* ptr = got < 0 ? (void*)tmp : (void*)(out + 2 * got);
-            size_t room = got < 0 ? 8192 : (size_t)(want - got);
+            /* the samples skipped end exactly where the capture starts */
+            size_t room = got < 0 ? (size_t)(-got < 8192 ? -got : 8192) : (size_t)(want - got);
             if (room > spb)
                 room = spb;
             uhd_rx_streamer_recv(r->rx, &ptr, room, &r->md, 1.0, false, &k);
