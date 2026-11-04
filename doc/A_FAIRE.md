@@ -19,11 +19,16 @@ T, T2, C et le frontal.
   le câble SFR (602 MHz, 64-QAM, 28,5 dB, le 4/11/2026).
 - **DVB-T2 sur le câble SFR (586 MHz)** : reçu depuis le 4/11/2026, avec France 2
   UHD et Test UHD (commits 26a58cd et b21c349 : inversion, horloge mesurée par
-  l'espacement des P1, mode HEM, `-G auto:44`). Reste à améliorer : environ 1,3 %
-  de blocs FEC en échec à 25 dB (256-QAM 5/6, juste au-dessus du seuil). Pistes :
-  la saturation de l'entrée (filtre de bande, ou atténuation du DOCSIS) et le suivi
-  d'horloge et de phase sur les porteuses des bords. Faire aussi l'inversion pour
-  le DVB-T, par sécurité. Détails dans `work/cable-sfr.txt`.
+  l'espacement des P1, mode HEM), puis def6dce : filtre analogique calé sur le
+  canal demandé et AGC cherchant le meilleur SNR (le plafond fixe `-G auto:44`
+  n'est plus nécessaire). Blocs FEC perdus : environ 0,6 % à 25,7 dB (470 → 230
+  en 40 s). Reste à améliorer : un filtre RF de bande avant le B210 (le
+  DOCSIS pèse encore sur l'ampli d'entrée et le mélangeur) ; le suivi d'horloge
+  et de phase sur les porteuses des bords ; l'inversion pour le DVB-T. La
+  répartition du gain dans l'AD9361 (moins d'ampli d'entrée, plus de gain après
+  le filtre) n'est pas accessible par UHD (un seul élément « PGA », et l'AGC
+  matérielle telle que UHD la configure affame le convertisseur) : il faudrait
+  écrire dans les registres de l'AD9361. Détails dans `work/cable-sfr.txt`.
 
 ## Scan
 
