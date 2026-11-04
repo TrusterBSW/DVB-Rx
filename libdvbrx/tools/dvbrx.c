@@ -17,11 +17,15 @@
  *   -s SYMRATE  symbol rate (standalone)
  *   -S RATE     sample rate (standalone, default 2 x symbol rate); bridge
  *               mode: maximum sample rate (default 56e6)
- *   -G DB       receive gain (default 40), or "auto": kept for a mean input
- *               level of -24 dBFS, lowered at once if the ADC clips;
- *               "auto:MAX" caps it at MAX dB (a cable network overloads the
- *               B210 front-end beyond ~46 dB: the other channels, not the
- *               one received, set the limit)
+ *   -G DB       receive gain (default 40), or "auto": first kept for a mean
+ *               input level of -24 dBFS (lowered at once if the ADC clips),
+ *               then, once the receiver locks, moved in 3 dB steps to the
+ *               gain giving the best SNR (the other channels of a cable or
+ *               an antenna can overload the front-end well before the
+ *               wanted one fills the ADC); "auto:MAX" caps it at MAX dB
+ *   -B HZ       analog baseband filter bandwidth (default: the occupied
+ *               bandwidth of the channel + 15 %, or the whole capture for
+ *               several channels; 0: UHD's choice)
  *   -A ANT      receive antenna, e.g. "TX/RX" or "RX2" (default: UHD's)
  *   -M HZ       master clock rate (default: chosen by UHD)
  *   -r ROLLOFF  roll-off (standalone, default 0.2)
@@ -97,6 +101,9 @@ struct radio {
     double gain, mcr, gain_max;
     int gain_auto; /* -G auto: gain from the measured level (UHD) */
     double gain_cap; /* -G auto:MAX, 0: none */
+    double bw_opt;   /* -B: < 0 auto, 0 UHD's, > 0 fixed */
+    double bw_need;  /* auto: bandwidth to pass (channel or capture), 0: rate */
+    double bw_set;   /* analog bandwidth obtained */
     const char* antenna;
 
     /* current run */
@@ -209,7 +216,15 @@ struct level {
     double pow;
     uint64_t n, clip;
     int skip;
+    /* best-SNR search (single receiver): 0 level AGC, 1 searching, 2 done */
+    int opt, stable, dir, tried_down, unlocked;
+    double best_g, best_snr, acc, base_dbfs;
+    int nacc;
 };
+
+#define OPT_STEP 3.0   /* dB */
+#define OPT_WINDOWS 2  /* level windows averaged per gain */
+#define OPT_BETTER 0.3 /* dB of SNR to call a gain better */
 
 static void radio_level(struct radio* r, struct level* lv, const float* iq, int n)
 {
@@ -238,12 +253,86 @@ static void radio_level(struct radio* r, struct level* lv, const float* iq, int 
         lv->skip = 0;
         return;
     }
+    const double gmax = r->gain_cap > 0 ? fmin(r->gain_cap, r->gain_max) : r->gain_max;
     double g = r->gain;
-    if (clip > AGC_CLIP)
+    /* receiver state, for the best-SNR search (one receiver on the radio) */
+    int locked = 0;
+    float snr = 0;
+    if (r->mt && !r->sink) {
+        drx_rx_stats st;
+        drx_mt_get_stats(r->mt, &st);
+        locked = st.locked && st.snr_db > 0;
+        snr = st.snr_db;
+    }
+    if (clip > AGC_CLIP) {
         g -= clip > 1e-2 ? 10 : 6; /* heavy clipping: the level is not measurable */
-    else if (dbfs < AGC_TARGET - AGC_HYST || dbfs > AGC_TARGET + AGC_HYST)
-        g += fmax(-10, fmin(10, AGC_TARGET - dbfs));
-    g = fmax(0, fmin(r->gain_cap > 0 ? fmin(r->gain_cap, r->gain_max) : r->gain_max, round(g)));
+        lv->opt = 0;
+        lv->stable = 0;
+    } else if (lv->opt == 0) {
+        if (dbfs < AGC_TARGET - AGC_HYST || dbfs > AGC_TARGET + AGC_HYST) {
+            g += fmax(-10, fmin(10, AGC_TARGET - dbfs));
+            lv->stable = 0;
+        } else if (++lv->stable >= 2 && locked) {
+            /* level reached and locked: look for the best SNR around */
+            lv->opt = 1;
+            lv->best_g = g;
+            lv->best_snr = -1e9;
+            lv->dir = 1;
+            lv->tried_down = 0;
+            lv->acc = 0;
+            lv->nacc = 0;
+        }
+    } else if (lv->opt == 1) {
+        if (!locked) { /* lost while searching: back to the best known, and the level AGC */
+            lv->opt = 0;
+            lv->stable = 0;
+            if (lv->best_snr > -1e9)
+                g = lv->best_g;
+        } else {
+            lv->acc += snr;
+            if (++lv->nacc >= OPT_WINDOWS) {
+                const double s = lv->acc / lv->nacc;
+                double next = -1;
+                fprintf(stderr, "AGC: gain %.0f dB: SNR %.2f dB\n", g, s);
+                if (s > lv->best_snr + OPT_BETTER) {
+                    lv->best_snr = s;
+                    lv->best_g = g;
+                    next = g + lv->dir * OPT_STEP;
+                } else if (lv->dir > 0 && !lv->tried_down) {
+                    lv->dir = -1;
+                    lv->tried_down = 1;
+                    next = lv->best_g - OPT_STEP;
+                }
+                if (next < 0 || next > gmax) {
+                    if (lv->dir > 0 && !lv->tried_down) {
+                        lv->dir = -1;
+                        lv->tried_down = 1;
+                        next = lv->best_g - OPT_STEP;
+                    }
+                    if (next < 0 || next > gmax)
+                        next = -1;
+                }
+                if (next < 0) {
+                    g = lv->best_g;
+                    lv->opt = 2;
+                    lv->unlocked = 0;
+                    lv->base_dbfs = dbfs + (lv->best_g - r->gain);
+                    fprintf(stderr, "AGC: best SNR %.2f dB at %.0f dB\n", lv->best_snr, lv->best_g);
+                } else {
+                    g = next;
+                }
+                lv->acc = 0;
+                lv->nacc = 0;
+            }
+        }
+    } else { /* done: start over on a lasting loss of lock or a level change */
+        lv->unlocked = locked ? 0 : lv->unlocked + 1;
+        if (lv->unlocked >= 4 || fabs(dbfs - lv->base_dbfs) > 8) {
+            lv->opt = 0;
+            lv->stable = 0;
+        }
+    }
+    g = fmax(0, fmin(gmax, round(g)));
     if (g != r->gain) {
         uhd_usrp_set_rx_gain(r->usrp, g, 0, "");
         uhd_usrp_get_rx_gain(r->usrp, 0, "", &g);
@@ -347,8 +436,20 @@ static double radio_configure(struct radio* r, double freq, double rate)
     if (uhd_open(r))
         return -1;
     uhd_usrp_set_rx_rate(r->usrp, rate, 0);
+    uhd_usrp_set_rx_agc(r->usrp, false, 0); /* the AD9361's own AGC, as UHD sets it up, starves the ADC */
     uhd_usrp_set_rx_gain(r->usrp, r->gain, 0, "");
     uhd_usrp_get_rx_gain(r->usrp, 0, "", &r->gain);
+    /* Analog filter: the AD9361 low-pass ahead of its ADC. Narrow, it keeps
+     * the neighbouring channels (often stronger on a cable) out of the ADC
+     * range; the digital filters only act after it. */
+    if (r->bw_opt != 0) {
+        double bw = r->bw_opt > 0 ? r->bw_opt : r->bw_need > 0 ? 1.15 * r->bw_need : rate;
+        bw = bw < 0.2e6 ? 0.2e6 : bw > 56e6 ? 56e6 : bw;
+        uhd_usrp_set_rx_bandwidth(r->usrp, bw, 0);
+        double got = bw;
+        uhd_usrp_get_rx_bandwidth(r->usrp, 0, &got);
+        r->bw_set = got;
+    }
     if (r->antenna && uhd_usrp_set_rx_antenna(r->usrp, r->antenna, 0))
         fprintf(stderr, "UHD: cannot select antenna \"%s\"\n", r->antenna);
     uhd_tune_request_t req = { .target_freq = freq,
@@ -358,8 +459,9 @@ static double radio_configure(struct radio* r, double freq, double rate)
     uhd_usrp_set_rx_freq(r->usrp, &req, 0, &tune);
     double actual = rate;
     uhd_usrp_get_rx_rate(r->usrp, 0, &actual);
-    fprintf(stderr, "UHD: %.3f MHz, %.6f Msps (asked %.6f), gain %.1f dB\n",
-            tune.actual_rf_freq / 1e6, actual / 1e6, rate / 1e6, r->gain);
+    fprintf(stderr, "UHD: %.3f MHz, %.6f Msps (asked %.6f), gain %.1f dB, analog bandwidth %.2f MHz\n",
+            tune.actual_rf_freq / 1e6, actual / 1e6, rate / 1e6, r->gain,
+            r->bw_set / 1e6);
     r->rate = actual;
     return actual;
 #else
@@ -381,6 +483,28 @@ static void radio_retune(struct radio* r, double freq)
     uhd_tune_result_t tune;
     uhd_usrp_set_rx_freq(r->usrp, &req, 0, &tune);
     fprintf(stderr, "UHD: retuned to %.3f MHz\n", tune.actual_rf_freq / 1e6);
+#endif
+}
+
+/* Analog filter for the channels in use: twice the farthest channel edge
+ * from the centre (auto mode only; the whole capture when none is open). */
+static void radio_set_span(struct radio* r, double half_span)
+{
+#ifdef HAVE_UHD
+    if (r->file || !r->usrp || r->bw_opt >= 0)
+        return;
+    double bw = half_span > 0 ? 2 * 1.15 * half_span : r->rate;
+    bw = bw < 0.2e6 ? 0.2e6 : bw > 56e6 ? 56e6 : bw;
+    if (fabs(bw - r->bw_set) < 0.05e6)
+        return;
+    uhd_usrp_set_rx_bandwidth(r->usrp, bw, 0);
+    double got = bw;
+    uhd_usrp_get_rx_bandwidth(r->usrp, 0, &got);
+    r->bw_set = got;
+    fprintf(stderr, "UHD: analog bandwidth %.2f MHz\n", got / 1e6);
+#else
+    (void)r;
+    (void)half_span;
 #endif
 }
 
@@ -680,6 +804,20 @@ static int hub_fits(const struct hub* h, double lo, double f, double occ)
 /* Chooses the capture centre for a new channel of adapter b, keeping the
  * channels of the other adapters inside the capture; retunes if needed.
  * Returns 0, or -1 when the channel does not fit. */
+/* Analog filter around the channels open on the capture (b: being placed). */
+static void hub_filter(struct hub* h, const struct bridge* b)
+{
+    double half = 0;
+    for (int i = 0; i < h->n; i++) {
+        const struct bridge* o = h->b[i];
+        if (o != b && !o->mt)
+            continue;
+        const double e = fabs(o->ch_freq - h->lo) + o->ch_occ / 2;
+        half = e > half ? e : half;
+    }
+    radio_set_span(h->radio, half);
+}
+
 static int hub_place(struct hub* h, struct bridge* b, double f, double occ)
 {
     double lo = h->lo;
@@ -734,6 +872,7 @@ static int hub_place(struct hub* h, struct bridge* b, double f, double occ)
                     hub_active(h, b), hub_active(h, b) > 1 ? "s" : "");
         h->lo = lo;
     }
+    hub_filter(h, b);
     return 0;
 }
 
@@ -759,6 +898,8 @@ static void hub_detach(struct hub* h, struct bridge* b)
     if (h->streaming && !hub_active(h, NULL)) {
         radio_stop(h->radio);
         h->streaming = 0;
+    } else {
+        hub_filter(h, NULL);
     }
     drx_mt_free(mt);
 }
@@ -891,6 +1032,7 @@ static double single_rate(struct bridge* b, const struct dvbrx_tune* t, const st
     double want = n->want > b->max_rate ? b->max_rate : n->want;
     if (want < n->min)
         return -1;
+    b->radio->bw_need = n->occ;
     double rate = radio_configure(b->radio, freq, want);
     if (is_ofdm(t) && rate > 0 && rate < n->min) /* rounded down below what is needed */
         rate = radio_configure(b->radio, freq, n->min * 1.3);
@@ -1248,6 +1390,7 @@ static int run_multi(struct radio* radio, char** specs, int n, double centre, do
         centre = (lo + hi) / 2;
     if (rate <= 0)
         rate = 30.72e6;
+    radio->bw_need = 2 * fmax(hi - centre, centre - lo); /* the channels asked for */
     if ((rate = radio_configure(radio, centre, rate)) <= 0)
         return 1;
     drx_chan* chan = drx_chan_new(rate);
@@ -1323,7 +1466,7 @@ static void usage(const char* prog)
 int main(int argc, char** argv)
 {
     const char *dest = "-", *lnb_spec = "none";
-    struct radio radio = { .gain = 40 };
+    struct radio radio = { .gain = 40, .bw_opt = -1 };
     double freq = 0, rate = 0, symrate = 0;
     float rolloff = 0.2f;
     int threads = 2, realtime = 0, gold = 0, isi = DRX_ISI_ALL, rrc_delay = 0, bridge = -1;
@@ -1336,7 +1479,7 @@ int main(int argc, char** argv)
     char* multi[MAX_MULTI];
     int nmulti = 0;
     int opt;
-    while ((opt = getopt(argc, argv, "u:F:f:S:G:A:M:s:r:D:g:i:o:t:Rd:L:l:c:T:2:n:W:x:m:")) != -1) {
+    while ((opt = getopt(argc, argv, "u:F:f:S:G:A:B:M:s:r:D:g:i:o:t:Rd:L:l:c:T:2:n:W:x:m:")) != -1) {
         switch (opt) {
         case 'u': radio.uhd_args = optarg; break;
         case 'F': radio.file = optarg; break;
@@ -1349,6 +1492,7 @@ int main(int argc, char** argv)
                                          : atof(optarg);
             break;
         case 'A': radio.antenna = optarg; break;
+        case 'B': radio.bw_opt = atof(optarg); break;
         case 'M': radio.mcr = atof(optarg); break;
         case 's': symrate = atof(optarg); break;
         case 'r': rolloff = (float)atof(optarg); break;
@@ -1416,6 +1560,7 @@ int main(int argc, char** argv)
             if (wide_rate <= 0)
                 wide_rate = 30.72e6;
             hub.fixed_lo = freq > 0;
+            radio.bw_need = 0; /* the whole capture */
             hub.fs = radio_configure(&radio, freq > 0 ? freq : 1e9, wide_rate);
             if (hub.fs <= 0)
                 return 1;
@@ -1457,6 +1602,10 @@ int main(int argc, char** argv)
         return 1;
     }
     radio.file_loop = radio.file_realtime = realtime;
+    /* one channel at the centre (not -x, where it sits in a wider capture) */
+    radio.bw_need = !isnan(offset) ? 0
+                    : dvbt_bw > 0  ? (dvbt2 ? 0.98 : 0.95) * dvbt_bw
+                                   : symrate * (1 + (qam >= 0 ? 0.15 : rolloff));
     if ((rate = radio_configure(&radio, freq, rate)) <= 0)
         return 1;
     /* -x: -S is the rate of a wide capture, the channel is at -x Hz in it */
