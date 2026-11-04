@@ -19,15 +19,15 @@ T, T2, C et le frontal.
   le câble SFR (602 MHz, 64-QAM, 28,5 dB, le 4/11/2026).
 - **DVB-T2 sur le câble SFR (586 MHz), priorité haute** : voir
   `work/cable-sfr.txt`.
-  1. Ajouter l'inversion spectrale au T2, comme au DVB-C. Le réseau inverse le
-     spectre de ce multiplex ; c'est facile, en essayant les deux sens au P1.
-     Le faire aussi pour le DVB-T, par sécurité.
-  2. Le L1-post en 64-QAM ne passe pas la FEC sur le vrai signal (cellules à
-     environ 56 dB), alors qu'il passe sur gr-dtv. Notre implémentation et
-     gr-dtv partagent sans doute un écart à la norme : relire EN 302 755
-     §7.3.3 (entrelacement de bits, démux, ordre des bits du 64-QAM pour le
-     L1). La capture réelle `~/dvbrx/work/real/t586.fc32` (hôte) sert de
-     référence ; `DRX_T2_DEBUG=1` trace les étapes.
+  1. ~~Inversion spectrale du T2~~ : fait (détection au P1). Reste à le faire
+     pour le DVB-T, par sécurité.
+  2. Le L1-post ne passe pas sur ce câble. Le format est vérifié conforme à
+     la norme ; c'est la qualité de démodulation en 32K qui manque (P2
+     équivalent à environ 9-10 dB, alors que le DVB-T 8K du même câble donne
+     19-25 dB). Pistes : bruit de phase ou écart d'horloge d'échantillonnage
+     (correction dès le P2), niveau d'entrée ou entrée RX2, LNA. Capture :
+     `~/dvbrx/work/real/t586_g55.fc32` (hôte) ; détails dans
+     `work/cable-sfr.txt`.
 
 ## Scan
 
