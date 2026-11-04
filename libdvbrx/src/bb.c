@@ -68,8 +68,18 @@ void drx_bb_descramble(uint8_t* frame, int kbch_bytes)
 
 int drx_bbheader_parse(const uint8_t* in, drx_bbheader* h)
 {
-    if (drx_crc8(in, DRX_BBHEADER_LEN) != 0)
-        return -1;
+    /* Normal mode: the CRC-8 of the 9 first bytes; DVB-T2 High Efficiency
+     * Mode: the same XOR 1 (taken only for a TS without ISSY, whose UPL and
+     * SYNC fields are then 0, so that a damaged DVB-S2 header is not read
+     * as HEM). */
+    const uint8_t c = drx_crc8(in, DRX_BBHEADER_LEN - 1);
+    h->hem = 0;
+    if (c != in[DRX_BBHEADER_LEN - 1]) {
+        if ((c ^ 1) != in[DRX_BBHEADER_LEN - 1] || in[0] >> 6 != DRX_TS || (in[0] & 0x08) || in[2] || in[3] ||
+            in[6])
+            return -1;
+        h->hem = 1;
+    }
     h->ts_gs = in[0] >> 6;
     h->sis = (in[0] >> 5) & 1;
     h->ccm = (in[0] >> 4) & 1;
@@ -119,12 +129,13 @@ void drx_bbdec_get_stats(const drx_bbdec* d, drx_bbdec_stats* s) { *s = d->stats
 
 /* A user packet in the data field is 187 bytes (sync byte removed) followed
  * by the CRC-8 of those bytes, which takes the place of the next packet's
- * sync byte. Restore the sync byte and flag CRC failures. */
-static void emit(drx_bbdec* d, const uint8_t* up, uint8_t sync, uint8_t* out)
+ * sync byte. Restore the sync byte and flag CRC failures. In HEM there is
+ * no CRC: the 187 bytes only (the FEC is all the protection). */
+static void emit(drx_bbdec* d, const uint8_t* up, uint8_t sync, int hem, uint8_t* out)
 {
-    out[0] = sync;
+    out[0] = hem ? 0x47 : sync;
     memcpy(out + 1, up, DRX_TS_PACKET_LEN - 1);
-    if (drx_crc8(up, DRX_TS_PACKET_LEN) != 0) {
+    if (!hem && drx_crc8(up, DRX_TS_PACKET_LEN) != 0) {
         out[1] |= TEI;
         d->stats.crc_errors++;
     }
@@ -142,8 +153,11 @@ int drx_bbdec_frame(drx_bbdec* d,
         d->stats.bad_headers++;
         return -1;
     }
-    if (h->ts_gs != DRX_TS || h->upl != DRX_TS_PACKET_LEN * 8)
+    if (h->ts_gs != DRX_TS || (!h->hem && h->upl != DRX_TS_PACKET_LEN * 8))
         return 0;
+    /* bytes of a user packet in the data field, and the byte SYNCD points
+     * at before it (normal mode: the CRC ending the previous packet) */
+    const int L = h->hem ? DRX_TS_PACKET_LEN - 1 : DRX_TS_PACKET_LEN, lead = h->hem ? 0 : 1;
 
     struct stream* s = d->streams[h->isi];
     if (!s) {
@@ -159,38 +173,38 @@ int drx_bbdec_frame(drx_bbdec* d,
 
     /* SYNCD points at the CRC byte ending the packet in progress, so it must
      * match the bytes still missing from the partial packet. */
-    if (s->synced && s->partial > 0 && syncd != DRX_TS_PACKET_LEN - 1 - s->partial) {
+    if (s->synced && s->partial > 0 && syncd != L - lead - s->partial) {
         s->synced = 0;
         d->stats.gaps++;
     }
     if (!s->synced) {
-        if (syncd + 1 > left) /* no packet starts in this frame */
+        if (syncd + lead > left) /* no packet starts in this frame */
             return 0;
-        in += syncd + 1;
-        left -= syncd + 1;
+        in += syncd + lead;
+        left -= syncd + lead;
         s->partial = 0;
         s->synced = 1;
     }
 
     if (s->partial > 0) {
-        int need = DRX_TS_PACKET_LEN - s->partial;
+        int need = L - s->partial;
         if (need > left) {
             memcpy(s->pkt + s->partial, in, left);
             s->partial += left;
             return 0;
         }
         memcpy(s->pkt + s->partial, in, need);
-        emit(d, s->pkt, h->sync, out);
+        emit(d, s->pkt, h->sync, h->hem, out);
         n += DRX_TS_PACKET_LEN;
         in += need;
         left -= need;
         s->partial = 0;
     }
-    while (left >= DRX_TS_PACKET_LEN) {
-        emit(d, in, h->sync, out + n);
+    while (left >= L) {
+        emit(d, in, h->sync, h->hem, out + n);
         n += DRX_TS_PACKET_LEN;
-        in += DRX_TS_PACKET_LEN;
-        left -= DRX_TS_PACKET_LEN;
+        in += L;
+        left -= L;
     }
     memcpy(s->pkt, in, left);
     s->partial = left;

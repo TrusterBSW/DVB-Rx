@@ -36,6 +36,8 @@ typedef struct {
     uint16_t dfl;    /* data field length, bits */
     uint8_t sync;    /* user packet sync byte */
     uint16_t syncd;  /* bits from the start of the data field to the first UP */
+    uint8_t hem;     /* DVB-T2 High Efficiency Mode: TS packets without sync
+                      * byte or CRC (187 bytes), CRC-8 of the header XOR 1 */
 } drx_bbheader;
 
 /* CRC-8 used by the BBHEADER and the TS packets (x^8+x^7+x^6+x^4+x^2+1). */

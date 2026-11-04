@@ -621,6 +621,11 @@ struct drx_dvbt2 {
     double complex *p1c1, *p1c2; /* find_p1 prefix sums */
     double complex *p1c1i, *p1c2i; /* the same for an inverted spectrum */
     int inv; /* input conjugated: spectrum inverted (cable networks) */
+    /* sample clock from the P1 spacing during acquisition: absolute index
+     * of the buffer start, last P1 acquired, nominal frame length */
+    long long base, p1_abs;
+    long frame_len;
+    int clock_hold; /* acquisitions to skip after a correction */
     double* p1e;
     struct fft fft1k, fft;
     cf* win; /* FFT buffer, 32K */
@@ -710,6 +715,7 @@ drx_dvbt2* drx_dvbt2_new(double sample_rate, double bandwidth, int plp_id)
     d->want_plp = plp_id;
     d->step_nominal = sample_rate / d->elem_rate;
     d->step = d->step_nominal;
+    d->p1_abs = -1;
     d->cap = 1 << 20;
     d->buf = malloc(sizeof(cf) * d->cap);
     d->win = malloc(sizeof(cf) * 32768);
@@ -1882,6 +1888,7 @@ static int frame_l1(drx_dvbt2* d)
     d->guard_idx = e->guard;
     d->ldata = e->num_data_symbols;
     d->lf = d->L.np2 + d->ldata;
+    d->frame_len = P1_LEN + (long)d->lf * d->sym_len;
     d->have_pre = 1;
     ensure_cells(d);
     if (decode_l1post(d)) {
@@ -2452,6 +2459,7 @@ static void compact(drx_dvbt2* d)
     memmove(d->buf, d->buf + drop, sizeof(cf) * (d->nbuf - drop));
     d->nbuf -= drop;
     d->pos -= drop;
+    d->base += drop;
 }
 
 static int reserve(drx_dvbt2* d, int n)
@@ -2467,6 +2475,38 @@ static int reserve(drx_dvbt2* d, int n)
         d->cap *= 2;
     }
     return 0;
+}
+
+/* Sample clock during acquisition. The data symbols track the clock, but
+ * only once the L1 decodes: with a cheap SDR reference (23 ppm on a B210
+ * clone) a 32K P2 is too damaged at its edges for that, and every frame
+ * starts over. The spacing of successive P1s against the frame length the
+ * L1-pre gave measures the clock to about 1 ppm: the resampler step is
+ * corrected before the next frame. */
+static void acq_clock(drx_dvbt2* d, int s)
+{
+    const long long a = d->base + s;
+    if (d->clock_hold > 0) {
+        /* samples resampled before the correction are still buffered up
+         * the pipeline (up to some 140 ms): measure again later */
+        d->clock_hold--;
+        d->p1_abs = -1;
+        return;
+    }
+    if (d->p1_abs >= 0 && d->frame_len > 0) {
+        const double diff = (double)(a - d->p1_abs);
+        const long k = lround(diff / d->frame_len);
+        if (k >= 1 && k <= 16) {
+            const double delta = diff / ((double)k * d->frame_len) - 1;
+            if (fabs(delta) < 300e-6 && fabs(delta) > 0.3e-6) {
+                d->step = d->step * (1 + delta); /* atomic: plain load and store */
+                d->clock_hold = 2;
+                if (t2_debug())
+                    fprintf(stderr, "t2: P1 spacing: clock %+.2f ppm, step corrected\n", delta * 1e6);
+            }
+        }
+    }
+    d->p1_abs = a;
 }
 
 /* Acquisition: P1, then the frame starts. */
@@ -2488,6 +2528,7 @@ static int acquire(drx_dvbt2* d)
             d->pos = s + 1024;
             continue;
         }
+        acq_clock(d, s);
         if (d->fft.n != d->n) {
             fft_free(&d->fft);
             if (fft_init(&d->fft, d->n))
@@ -2536,6 +2577,7 @@ void drx_dvbt2_gap(drx_dvbt2* d)
 {
     restart(d);
     d->pos = d->nbuf;
+    d->p1_abs = -1;
 }
 
 static int set_step(drx_dvbt2* d, double step)

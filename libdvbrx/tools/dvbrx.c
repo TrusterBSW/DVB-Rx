@@ -18,7 +18,10 @@
  *   -S RATE     sample rate (standalone, default 2 x symbol rate); bridge
  *               mode: maximum sample rate (default 56e6)
  *   -G DB       receive gain (default 40), or "auto": kept for a mean input
- *               level of -24 dBFS, lowered at once if the ADC clips
+ *               level of -24 dBFS, lowered at once if the ADC clips;
+ *               "auto:MAX" caps it at MAX dB (a cable network overloads the
+ *               B210 front-end beyond ~46 dB: the other channels, not the
+ *               one received, set the limit)
  *   -A ANT      receive antenna, e.g. "TX/RX" or "RX2" (default: UHD's)
  *   -M HZ       master clock rate (default: chosen by UHD)
  *   -r ROLLOFF  roll-off (standalone, default 0.2)
@@ -93,6 +96,7 @@ struct radio {
     int file_realtime; /* pace the file at the sample rate, drop when late */
     double gain, mcr, gain_max;
     int gain_auto; /* -G auto: gain from the measured level (UHD) */
+    double gain_cap; /* -G auto:MAX, 0: none */
     const char* antenna;
 
     /* current run */
@@ -239,7 +243,7 @@ static void radio_level(struct radio* r, struct level* lv, const float* iq, int 
         g -= clip > 1e-2 ? 10 : 6; /* heavy clipping: the level is not measurable */
     else if (dbfs < AGC_TARGET - AGC_HYST || dbfs > AGC_TARGET + AGC_HYST)
         g += fmax(-10, fmin(10, AGC_TARGET - dbfs));
-    g = fmax(0, fmin(r->gain_max, round(g)));
+    g = fmax(0, fmin(r->gain_cap > 0 ? fmin(r->gain_cap, r->gain_max) : r->gain_max, round(g)));
     if (g != r->gain) {
         uhd_usrp_set_rx_gain(r->usrp, g, 0, "");
         uhd_usrp_get_rx_gain(r->usrp, 0, "", &g);
@@ -1339,8 +1343,10 @@ int main(int argc, char** argv)
         case 'f': freq = atof(optarg); break;
         case 'S': rate = atof(optarg); break;
         case 'G':
-            radio.gain_auto = !strcmp(optarg, "auto");
-            radio.gain = radio.gain_auto ? 30 : atof(optarg);
+            radio.gain_auto = !strncmp(optarg, "auto", 4);
+            radio.gain_cap = radio.gain_auto && optarg[4] == ':' ? atof(optarg + 5) : 0;
+            radio.gain = radio.gain_auto ? (radio.gain_cap > 0 && radio.gain_cap < 30 ? radio.gain_cap : 30)
+                                         : atof(optarg);
             break;
         case 'A': radio.antenna = optarg; break;
         case 'M': radio.mcr = atof(optarg); break;
