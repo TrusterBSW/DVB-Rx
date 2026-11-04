@@ -45,7 +45,8 @@ def channel_block(ch):
         add("FREQUENCY", int(round(ch["freq"] / 1e5) * 1e5))
         add("SYMBOL_RATE", int(ch.get("symbol_rate") or 6875000))
         add("INNER_FEC", "NONE")
-        add("MODULATION", modulation_v5(ch.get("modulation"), ds) or "QAM/AUTO")
+        # modulation douteuse sur un signal faible : laisser le récepteur la chercher
+        add("MODULATION", (None if ch.get("weak") else modulation_v5(ch.get("modulation"), ds)) or "QAM/AUTO")
         add("INVERSION", "AUTO")
     elif ds in ("DVB-T", "DVB-T2"):
         add("DELIVERY_SYSTEM", "DVBT" if ds == "DVB-T" else "DVBT2")

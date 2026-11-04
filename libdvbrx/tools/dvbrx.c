@@ -1767,6 +1767,9 @@ static void ctl_request(const char* req, struct sbuf* o)
         const double t_rate = since_lock ? now() - t_lock : now() - b->t0;
         const uint64_t p_rate = since_lock ? p_lock : 0;
         const double gain = b->radio->gain, level = b->radio->level_dbfs;
+        /* locked: a real TS rate (a DVB TS has a constant rate), not a few packets */
+        const double ts_mbps = t_rate > 0 ? (s.ts_packets - p_rate) * 1504.0 / t_rate / 1e6 : 0;
+        const int locked = s.ts_packets > 0 && ts_mbps > 1.0;
         const double off = s.freq * b->symrate;
         struct psi_result* pr = malloc(sizeof(*pr));
         if (pr)
@@ -1792,7 +1795,7 @@ static void ctl_request(const char* req, struct sbuf* o)
         }
         sb_printf(o, "{\"ok\": true, \"locked\": %s, \"delsys\": \"%s\", \"symbol_rate\": %u, \"bandwidth\": %u, "
                      "\"rolloff\": %.2f, \"plp\": %d, ",
-                  s.ts_packets > 0 ? "true" : "false", delsys_name(tt.delivery_system), is_ofdm(&tt) ? 0 : tt.symbol_rate,
+                  locked ? "true" : "false", delsys_name(tt.delivery_system), is_ofdm(&tt) ? 0 : tt.symbol_rate,
                   is_ofdm(&tt) ? tt.bandwidth_hz : 0,
                   is_ofdm(&tt) || tt.delivery_system == SYS_DVBC_ANNEX_A ? 0.0 : rolloff_of(&tt), tt.stream_id);
         if (tt.delivery_system == SYS_DVBS2)
@@ -1805,9 +1808,9 @@ static void ctl_request(const char* req, struct sbuf* o)
         sb_printf(o, ", \"modulation\": %s%s%s, \"code_rate\": %s%s%s, ", s.constellation ? "\"" : "",
                   s.constellation ? s.constellation : "null", s.constellation ? "\"" : "", rate[0] ? "\"" : "",
                   rate[0] ? rate : "null", rate[0] ? "\"" : "");
-        sb_num(o, "ts_mbps", t_rate > 0 ? (s.ts_packets - p_rate) * 1504.0 / t_rate / 1e6 : NAN, 2);
-        sb_printf(o, ", \"ts_errors\": %llu, \"fec_blocks\": %llu, \"fec_errors\": %llu, ",
-                  (unsigned long long)s.ts_crc_errors, (unsigned long long)s.plframes,
+        sb_num(o, "ts_mbps", t_rate > 0 ? ts_mbps : NAN, 2);
+        sb_printf(o, ", \"ts_packets\": %llu, \"ts_errors\": %llu, \"fec_blocks\": %llu, \"fec_errors\": %llu, ",
+                  (unsigned long long)s.ts_packets, (unsigned long long)s.ts_crc_errors, (unsigned long long)s.plframes,
                   (unsigned long long)s.bch_failed);
         sb_num(o, "gain", gain, 1);
         sb_printf(o, ", ");

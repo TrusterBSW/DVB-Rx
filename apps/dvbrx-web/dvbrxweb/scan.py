@@ -423,11 +423,15 @@ class Scanner:
         info = {k: v for k, v in rep.items() if k not in ("ok", "services", "nit")}
         ch["probe"] = dict(info, nit=rep.get("nit") or [])
         ch["services"] = rep.get("services") or []
-        for k in ("snr_db", "freq_offset_hz", "modulation", "code_rate", "ts_mbps", "ts_errors",
+        for k in ("snr_db", "freq_offset_hz", "modulation", "code_rate", "ts_mbps", "ts_packets", "ts_errors",
                   "tsid", "onid", "network", "fft", "guard", "pilots", "rolloff",
                   "fec_blocks", "fec_errors"):
             if k in rep:
                 ch[k] = rep[k]
+        # plus de 1 % de paquets perdus : signal trop faible pour sa modulation, que la
+        # recherche automatique de QAM a pu mal identifier
+        npk, nerr = rep.get("ts_packets") or 0, rep.get("ts_errors") or 0
+        ch["weak"] = bool(ch["locked"] and npk and nerr > 0.01 * npk)
         if rep.get("plp") is not None and delsys == "DVB-T2":
             ch["plp"] = rep["plp"]
         if "level_dbfs" in rep and "gain" in rep:
@@ -466,7 +470,7 @@ class Scanner:
                 ch["docsis"] = True
                 ch["status"] = "DOCSIS (internet), non exporté"
             elif ch["locked"]:
-                ch["status"] = "verrouillé"
+                ch["status"] = "verrouillé, nombreuses erreurs (signal faible)" if ch["weak"] else "verrouillé"
             else:
                 ch["status"] = "porteuse unique non décodée"
             return
