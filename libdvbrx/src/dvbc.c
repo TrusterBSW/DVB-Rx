@@ -15,6 +15,7 @@
  * differential decoding ignores.
  */
 #include "dvbrx/dvbc.h"
+#include "tap.h"
 #include "fft.h"
 #include "outer.h"
 
@@ -204,6 +205,7 @@ static void init_diff(void)
 /* ---- receiver ------------------------------------------------------------ */
 
 struct drx_dvbc {
+    struct drx_tap* tap; /* constellation, or NULL */
     enum drx_qam want;
     int try_idx;
     struct qamdef q;
@@ -316,6 +318,8 @@ drx_dvbc* drx_dvbc_new(enum drx_qam qam)
     start_acq(d, 0);
     return d;
 }
+
+void drx_dvbc_set_tap(drx_dvbc* d, struct drx_tap* tap) { d->tap = tap; }
 
 void drx_dvbc_free(drx_dvbc* d)
 {
@@ -612,9 +616,15 @@ static int run_dd(drx_dvbc* d, const cf* s, int n)
     int prev_quad = d->prev_quad, nbits = d->nbits;
     uint8_t* const bits = d->bits;
     int i = 0;
+    /* constellation: every 8th equalised symbol while someone looks */
+    cf tb[64];
+    int nt = 0;
+    const int tap = drx_tap_on(d->tap);
     for (; i < n; i++) {
         const cf y = eq_filter(d, &q, eq_nco(&q, s[i]));
         q.count++;
+        if (tap && nt < 64 && !(q.count & 7))
+            tb[nt++] = y;
 
         int quad, lsb;
         cf dec;
@@ -663,6 +673,8 @@ static int run_dd(drx_dvbc* d, const cf* s, int n)
     d->prev_quad = prev_quad;
     d->nbits = nbits;
     eq_store(d, &q);
+    if (nt)
+        drx_tap_put(d->tap, (const float*)tb, nt, 1);
     return i;
 }
 

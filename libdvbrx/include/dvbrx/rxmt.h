@@ -59,6 +59,14 @@ void drx_mt_finish(drx_mt* mt);
 void drx_mt_free(drx_mt* mt);
 
 void drx_mt_get_stats(drx_mt* mt, drx_rx_stats* s);
+
+/*
+ * The last received symbols (after equalisation and carrier recovery),
+ * up to max points (interleaved I/Q) scaled to unit mean power; returns
+ * how many. Collecting them starts with this call and stops 5 s after the
+ * last one, so that it costs nothing when nobody looks.
+ */
+int drx_mt_constellation(drx_mt* mt, float* iq, int max);
 /* Samples dropped by non-blocking pushes. */
 uint64_t drx_mt_dropped(drx_mt* mt);
 

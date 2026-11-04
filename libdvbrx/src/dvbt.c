@@ -23,6 +23,7 @@
  * outer layer, on a separate thread when asked.
  */
 #include "dvbrx/dvbt.h"
+#include "tap.h"
 #include "conv.h"
 #include "fft.h"
 #include "outer.h"
@@ -268,6 +269,7 @@ static void bits_out(void* ctx, const uint8_t* bits, int n) { outer_bits(ctx, bi
 /* ---- receiver --------------------------------------------------------------- */
 
 struct drx_dvbt {
+    struct drx_tap* tap; /* constellation, or NULL */
     double in_rate, elem_rate;
     int threaded;
     struct resamp rs;
@@ -427,6 +429,8 @@ drx_dvbt* drx_dvbt_new(double sample_rate, double bandwidth, int threaded)
         pthread_create(&d->thread, NULL, back_thread, d);
     return d;
 }
+
+void drx_dvbt_set_tap(drx_dvbt* d, struct drx_tap* tap) { d->tap = tap; }
 
 void drx_dvbt_free(drx_dvbt* d)
 {
@@ -899,6 +903,27 @@ static int gather_bits_avx2(drx_dvbt* d)
  * serial order of the inner coder output, into d->soft; returns how many.
  * (Not inlined: inlined into run(), it changes how the compiler contracts
  * the floating point of track_symbol, hence its results in the last bits.) */
+/* Constellation: equalised data cells (every 16th) of the current symbol;
+ * apart from demap_symbol(), whose float code must not change. */
+__attribute__((noinline)) static void tap_cells(drx_dvbt* d)
+{
+    const struct mode* m = &d->m;
+    const int* dk = m->data[d->l & 3];
+    float z[2 * 512];
+    int n = 0;
+    for (int q = 0; q < m->ndata && n < 512; q += 16) {
+        const cf h = d->hk[dk[q]], x = d->x[dk[q]];
+        const float h2 = crealf(h) * crealf(h) + cimagf(h) * cimagf(h);
+        if (h2 <= 0)
+            continue;
+        const cf e = x * conjf(h) / h2;
+        z[2 * n] = crealf(e);
+        z[2 * n + 1] = cimagf(e);
+        n++;
+    }
+    drx_tap_put(d->tap, z, n, 1);
+}
+
 __attribute__((noinline)) static int demap_symbol(drx_dvbt* d)
 {
     const struct mode* m = &d->m;
@@ -909,6 +934,8 @@ __attribute__((noinline)) static int demap_symbol(drx_dvbt* d)
     const float norm = ax->norm;
     float err = 0, sig = 0;
     interp_channel(d);
+    if (drx_tap_on(d->tap))
+        tap_cells(d);
     /* symbol deinterleaver: y'(H(q)) = y(q) on odd symbols, y'(q) = y(H(q))
      * on even ones (clause 4.3.4.2) */
     const int* dst = odd ? m->hq : m->hinv;

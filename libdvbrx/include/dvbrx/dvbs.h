@@ -47,6 +47,10 @@ typedef void (*drx_dvbs_cb)(void* ctx, const uint8_t* ts, int len);
 drx_dvbs* drx_dvbs_new(enum drx_dvbs_rate rate, int threaded);
 void drx_dvbs_free(drx_dvbs* d);
 
+/* Constellation tap (see drx_mt_constellation()), NULL: none. */
+struct drx_tap;
+void drx_dvbs_set_tap(drx_dvbs* d, struct drx_tap* tap);
+
 /* Feed n symbols (interleaved I/Q, unit average energy). */
 void drx_dvbs_process(drx_dvbs* d, const float* sym, int n, drx_dvbs_cb cb, void* ctx);
 

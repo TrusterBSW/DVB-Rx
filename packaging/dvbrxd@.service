@@ -11,6 +11,10 @@ Group=video
 # serial LNB controller (dialout), USB access to the USRP (plugdev)
 SupplementaryGroups=dialout plugdev
 EnvironmentFile=/etc/dvbrxd/%i.conf
+# control socket /run/dvbrx/dvbrx-%i.sock (dvbrx-web), shared by the instances
+RuntimeDirectory=dvbrx
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
 ExecStart=/usr/local/bin/dvbrx -d %i $DVBRXD_ARGS
 Restart=on-failure
 RestartSec=2

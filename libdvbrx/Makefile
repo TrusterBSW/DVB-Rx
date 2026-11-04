@@ -29,8 +29,8 @@ build/fe_bench: tools/fe_bench.c build/libdvbrx.a
 build/dvbrx_file: tools/dvbrx_file.c build/libdvbrx.a
 	$(CC) $(CPPFLAGS) $(CFLAGS) $< build/libdvbrx.a -o $@ $(LDLIBS)
 
-build/dvbrx: tools/dvbrx.c build/libdvbrx.a ../kernel/dvbrx_ioctl.h
-	$(CC) $(CPPFLAGS) -I../kernel $(CFLAGS) $(UHD_FLAGS) $< build/libdvbrx.a -o $@ $(LDLIBS) $(UHD_LIBS)
+build/dvbrx: tools/dvbrx.c tools/psi.c tools/psi.h build/libdvbrx.a ../kernel/dvbrx_ioctl.h
+	$(CC) $(CPPFLAGS) -I../kernel $(CFLAGS) $(UHD_FLAGS) tools/dvbrx.c tools/psi.c build/libdvbrx.a -o $@ $(LDLIBS) $(UHD_LIBS)
 
 build/test_%: ../tests/test_%.c build/libdvbrx.a
 	$(CC) $(CPPFLAGS) $(CFLAGS) $< build/libdvbrx.a -o $@ $(LDLIBS)

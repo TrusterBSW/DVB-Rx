@@ -10,9 +10,11 @@
 #include "dvbrx/dvbt2.h"
 #include "dvbrx/ldpc.h"
 #include "dvbrx/pl.h"
+#include "tap.h"
 #include "queue.h"
 
 #include <stdio.h>
+#include <math.h>
 #include <string.h>
 
 #define SBLK 65536     /* samples (or symbols) per block */
@@ -103,6 +105,7 @@ struct drx_mt {
 
     pthread_mutex_t stats_lock;
     drx_rx_stats st;
+    struct drx_tap tap; /* constellation, see drx_mt_constellation() */
     uint64_t iter_sum;
 };
 
@@ -262,6 +265,8 @@ static void on_plframe(void* ctx, const drx_plframe* info, const float* xfec)
     b->n0[b->n] = info->n0;
     if (xfec != b->sym[b->n]) /* else already in place, see plframe_buffer() */
         memcpy(b->sym[b->n], xfec, sizeof(float) * 2 * info->nsym);
+    if (drx_tap_on(&mt->tap))
+        drx_tap_put(&mt->tap, xfec, info->nsym, info->nsym / 512 + 1);
     b->n++;
     if (b->n == mt->batch_max)
         for (int i = 0; i < mt->nopen; i++)
@@ -649,6 +654,14 @@ drx_mt* drx_mt_new(const drx_mt_cfg* cfg, drx_ts_cb cb, void* ctx)
         mt->dvbt = drx_dvbt_new(cfg->sample_rate, cfg->bandwidth, 1);
     if (cfg->dvbt2 && cfg->sample_rate >= cfg->bandwidth * 8 / 7)
         mt->dvbt2 = drx_dvbt2_new(cfg->sample_rate, cfg->bandwidth, cfg->rx.isi >= 0 ? cfg->rx.isi : -1);
+    if (mt->dvbs)
+        drx_dvbs_set_tap(mt->dvbs, &mt->tap);
+    if (mt->dvbc)
+        drx_dvbc_set_tap(mt->dvbc, &mt->tap);
+    if (mt->dvbt)
+        drx_dvbt_set_tap(mt->dvbt, &mt->tap);
+    if (mt->dvbt2)
+        drx_dvbt2_set_tap(mt->dvbt2, &mt->tap);
     mt->bb = drx_bbdec_new();
     mt->ts = malloc(58192 / 8 + 188);
     int ok = mt->fe && mt->pl && mt->bb && mt->ts && (!cfg->dvbs || mt->dvbs) &&
@@ -822,3 +835,25 @@ void drx_mt_get_stats(drx_mt* mt, drx_rx_stats* s)
 }
 
 uint64_t drx_mt_dropped(drx_mt* mt) { return mt->dropped; }
+
+int drx_mt_constellation(drx_mt* mt, float* iq, int max)
+{
+    atomic_store(&mt->tap.until, drx_tap_now() + 5.0);
+    const unsigned w = atomic_load_explicit(&mt->tap.w, memory_order_acquire);
+    int n = max < DRX_TAP_N ? max : DRX_TAP_N;
+    if ((unsigned)n > w)
+        n = (int)w;
+    double p = 0;
+    for (int i = 0; i < n; i++) {
+        const unsigned k = (w - n + i) % DRX_TAP_N;
+        iq[2 * i] = mt->tap.buf[2 * k];
+        iq[2 * i + 1] = mt->tap.buf[2 * k + 1];
+        p += (double)iq[2 * i] * iq[2 * i] + (double)iq[2 * i + 1] * iq[2 * i + 1];
+    }
+    if (n && p > 0) {
+        const float g = (float)(1.0 / sqrt(p / n));
+        for (int i = 0; i < 2 * n; i++)
+            iq[i] *= g;
+    }
+    return n;
+}

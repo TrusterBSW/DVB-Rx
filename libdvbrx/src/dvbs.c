@@ -9,6 +9,7 @@
  * stream continuously.
  */
 #include "dvbrx/dvbs.h"
+#include "tap.h"
 #include "conv.h"
 #include "outer.h"
 #include "queue.h"
@@ -83,6 +84,7 @@ static void back_free(struct back* b)
 /* ---- receiver ---------------------------------------------------------------- */
 
 struct drx_dvbs {
+    struct drx_tap* tap; /* constellation, or NULL */
     enum drx_dvbs_rate fixed_rate;
     int state, search_failures;
 
@@ -185,6 +187,8 @@ static void flush_block(drx_dvbs* d)
         decode_pairs(&d->back, (const int16_t (*)[2])p->pairs, p->n);
     queue_push(&d->free_q, p);
 }
+
+void drx_dvbs_set_tap(drx_dvbs* d, struct drx_tap* tap) { d->tap = tap; }
 
 void drx_dvbs_free(drx_dvbs* d)
 {
@@ -383,6 +387,8 @@ static void search(drx_dvbs* d)
 /* Locked: depuncture into blocks for the back end. */
 static void stream_symbols(drx_dvbs* d, const cf* z, int n)
 {
+    if (drx_tap_on(d->tap))
+        drx_tap_put(d->tap, (const float*)z, n, 4);
     int16_t soft[2 * 256];
     int16_t pairs[512][2];
     for (int i = 0; i < n; i += 256) {

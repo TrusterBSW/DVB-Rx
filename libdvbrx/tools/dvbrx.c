@@ -27,6 +27,9 @@
  *               bandwidth of the channel + 15 %, or the whole capture for
  *               several channels; 0: UHD's choice)
  *   -A ANT      receive antenna, e.g. "TX/RX" or "RX2" (default: UHD's)
+ *   -C PATH     bridge mode: control socket for dvbrx-web (default
+ *               /run/dvbrx/dvbrx-N.sock, "" for none), see doc/dvbrx-web-api.md
+ *   -P DB       input power estimate: dBm at 0 dBFS and 0 dB gain (default 0)
  *   -M HZ       master clock rate (default: chosen by UHD)
  *   -r ROLLOFF  roll-off (standalone, default 0.2)
  *   -D SYMBOLS  matched filter half-length (default: from the roll-off)
@@ -53,6 +56,11 @@
 #include "dvbrx/pl.h"
 #include "dvbrx/rxmt.h"
 #include "dvbrx_ioctl.h"
+#include "psi.h"
+
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/un.h>
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -64,6 +72,8 @@
 #include <poll.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -78,6 +88,7 @@
 #endif
 
 static volatile sig_atomic_t stop;
+static const char* ctl_path = "default"; /* -C: control socket, "" none */
 static void on_signal(int sig)
 {
     (void)sig;
@@ -104,6 +115,7 @@ struct radio {
     double bw_opt;   /* -B: < 0 auto, 0 UHD's, > 0 fixed */
     double bw_need;  /* auto: bandwidth to pass (channel or capture), 0: rate */
     double bw_set;   /* analog bandwidth obtained */
+    volatile int agc_state; /* 0 level AGC, 1 best-SNR search, 2 best gain held */
     const char* antenna;
 
     /* current run */
@@ -332,6 +344,7 @@ static void radio_level(struct radio* r, struct level* lv, const float* iq, int 
             lv->stable = 0;
         }
     }
+    r->agc_state = lv->opt;
     g = fmax(0, fmin(gmax, round(g)));
     if (g != r->gain) {
         uhd_usrp_set_rx_gain(r->usrp, g, 0, "");
@@ -754,6 +767,14 @@ struct bridge {
     uint64_t last_frames, last_packets;
     double t_frames, t_packets; /* when they last went up */
     double t0, last_status, last_print;
+    /* control socket (dvbrx-web) */
+    struct dvbrx_tune tune; /* the last tuning */
+    int mode;               /* who uses the receiver: 0 the application, 1 a probe, 2 the monitor */
+    uint64_t gen;           /* bumped at every tuning or stop */
+    psi* psi;               /* probe: service information collected */
+    double rate_t;          /* TS rate: last sample */
+    uint64_t rate_pk;
+    double ts_mbps;
 };
 
 /* ---- several adapters on one wideband capture ----------------------------- */
@@ -910,6 +931,11 @@ static void on_ts_bridge(void* ctx, int isi, const uint8_t* ts, int len)
 {
     (void)isi;
     struct bridge* b = ctx;
+    if (b->mode) { /* a probe or the monitor: not for the application */
+        if (b->psi)
+            psi_feed(b->psi, ts, len);
+        return;
+    }
     if (write(b->ctl, ts, len) != len)
         perror("write to /dev/dvbrx");
 }
@@ -1012,6 +1038,7 @@ static void rx_cfg_for(const struct bridge* b, const struct dvbrx_tune* t, doubl
 
 static void bridge_stop_rx(struct bridge* b)
 {
+    b->gen++;
     if (b->hub) {
         hub_detach(b->hub, b);
         return;
@@ -1076,6 +1103,7 @@ static void bridge_tune(struct bridge* b, const struct dvbrx_tune* t)
         return;
     }
     log_tune(b, t);
+    b->tune = *t;
     if (!is_ofdm(t) && t->symbol_rate == 0) {
         fprintf(stderr, "tune: symbol rate out of range\n");
         return;
@@ -1183,6 +1211,664 @@ static int lnb_event(struct bridge* b, const struct dvbrx_event* ev)
     return lnb_command(l, cmd);
 }
 
+/* ---- control socket (dvbrx-web, see doc/dvbrx-web-api.md) ---------------- */
+
+/* One lock for what changes a bridge's receiver: the event loop (the
+ * application's tunings) takes it per event, the control threads around
+ * their own tunings; status reads take it briefly. Never held while
+ * waiting (a probe sleeps without it). */
+static pthread_mutex_t ctl_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct bridge* ctl_b;
+static int ctl_n;
+static double ctl_input_offset = 0; /* -P: dBm at 0 dBFS and 0 dB gain (estimate) */
+static double ctl_last_status;        /* for the monitor watchdog */
+
+struct sbuf {
+    char* s;
+    size_t n, cap;
+};
+
+static void sb_printf(struct sbuf* b, const char* fmt, ...) __attribute__((format(printf, 2, 3)));
+static void sb_printf(struct sbuf* b, const char* fmt, ...)
+{
+    for (;;) {
+        va_list ap;
+        va_start(ap, fmt);
+        const int k = vsnprintf(b->s ? b->s + b->n : NULL, b->s ? b->cap - b->n : 0, fmt, ap);
+        va_end(ap);
+        if (k < 0)
+            return;
+        if (b->s && b->n + (size_t)k < b->cap) {
+            b->n += (size_t)k;
+            return;
+        }
+        size_t cap = b->cap ? b->cap * 2 : 4096;
+        while (cap < b->n + (size_t)k + 1)
+            cap *= 2;
+        char* t = realloc(b->s, cap);
+        if (!t)
+            return;
+        b->s = t;
+        b->cap = cap;
+    }
+}
+
+/* number as JSON, null when not finite */
+static void sb_num(struct sbuf* b, const char* key, double v, int prec)
+{
+    if (isfinite(v))
+        sb_printf(b, "\"%s\": %.*f", key, prec, v);
+    else
+        sb_printf(b, "\"%s\": null", key);
+}
+
+/* Minimal JSON reading for flat requests: the value after "key":. */
+static const char* json_val(const char* req, const char* key)
+{
+    char pat[64];
+    snprintf(pat, sizeof(pat), "\"%s\"", key);
+    const char* p = strstr(req, pat);
+    if (!p)
+        return NULL;
+    p += strlen(pat);
+    while (*p == ' ' || *p == '\t')
+        p++;
+    if (*p != ':')
+        return NULL;
+    p++;
+    while (*p == ' ' || *p == '\t')
+        p++;
+    return p;
+}
+
+static double json_num(const char* req, const char* key, double dflt)
+{
+    const char* p = json_val(req, key);
+    if (!p || !(*p == '-' || *p == '.' || (*p >= '0' && *p <= '9')))
+        return dflt;
+    return atof(p);
+}
+
+static int json_bool(const char* req, const char* key, int dflt)
+{
+    const char* p = json_val(req, key);
+    if (!p)
+        return dflt;
+    return !strncmp(p, "true", 4) ? 1 : !strncmp(p, "false", 5) ? 0 : dflt;
+}
+
+static int json_str(const char* req, const char* key, char* out, size_t n)
+{
+    const char* p = json_val(req, key);
+    out[0] = 0;
+    if (!p || *p != '"')
+        return 0;
+    p++;
+    size_t i = 0;
+    while (*p && *p != '"' && i + 1 < n)
+        out[i++] = *p++;
+    out[i] = 0;
+    return 1;
+}
+
+static const char* delsys_name(uint32_t d)
+{
+    switch (d) {
+    case SYS_DVBS: return "DVB-S";
+    case SYS_DVBS2: return "DVB-S2";
+    case SYS_DVBC_ANNEX_A: return "DVB-C";
+    case SYS_DVBT: return "DVB-T";
+    case SYS_DVBT2: return "DVB-T2";
+    }
+    return "?";
+}
+
+/* the application uses the receiver (a probe would take it away) */
+static int app_busy(const struct bridge* b)
+{
+    for (int i = 0; i < ctl_n; i++)
+        if (ctl_b[i].mt && ctl_b[i].mode == 0)
+            return 1;
+    (void)b;
+    return 0;
+}
+
+static void status_json(struct sbuf* o)
+{
+    const struct radio* r = ctl_b[0].radio;
+    const int running = r->started && r->running;
+    sb_printf(o, "{\"ok\": true, \"radio\": {\"source\": \"%s\", ", r->file ? "file" : "uhd");
+    sb_num(o, "freq", r->freq, 0);
+    sb_printf(o, ", ");
+    sb_num(o, "rate", r->rate, 0);
+    sb_printf(o, ", ");
+    sb_num(o, "bandwidth", r->bw_set > 0 ? r->bw_set : NAN, 0);
+    sb_printf(o, ", ");
+    sb_num(o, "gain", r->file ? NAN : r->gain, 1);
+    static const char* const agc[] = { "level", "search", "best" };
+    sb_printf(o, ", \"agc\": \"%s\", ", !r->gain_auto ? "manual" : agc[r->agc_state % 3]);
+    sb_num(o, "level_dbfs", running ? r->level_dbfs : NAN, 1);
+    sb_printf(o, ", ");
+    sb_num(o, "input_dbm", running && !r->file ? r->level_dbfs - r->gain + ctl_input_offset : NAN, 1);
+    sb_printf(o, ", \"overflows\": %llu, \"filled\": %llu, \"running\": %s", (unsigned long long)r->overflows,
+              (unsigned long long)r->filled, running ? "true" : "false");
+    const struct lnb* l = ctl_b[0].lnb && ctl_b[0].lnb->fd >= 0 ? ctl_b[0].lnb : NULL;
+    sb_printf(o, ", \"lnb\": {\"present\": %s, \"volt\": \"%s\", \"tone\": %s}}, \"channels\": [",
+              l ? "true" : "false",
+              !l ? "off" : l->voltage == SEC_VOLTAGE_13 ? "13" : l->voltage == SEC_VOLTAGE_18 ? "18" : "off",
+              l && l->tone == SEC_TONE_ON ? "true" : "false");
+    for (int i = 0; i < ctl_n; i++) {
+        const struct bridge* b = &ctl_b[i];
+        static const char* const modes[] = { "tuned", "probe", "monitor" };
+        sb_printf(o, "%s{\"adapter\": %d, \"state\": \"%s\"", i ? ", " : "", b->index,
+                  b->mt ? modes[b->mode % 3] : b->mode == 2 ? "monitor" : "idle");
+        if (b->mt || b->mode == 2) {
+            const struct dvbrx_tune* t = &b->tune;
+            sb_printf(o, ", \"delsys\": \"%s\", \"freq\": %.0f, \"symbol_rate\": %u, \"bandwidth\": %u",
+                      delsys_name(t->delivery_system), t->frequency_khz * 1e3,
+                      is_ofdm(t) ? 0 : t->symbol_rate, is_ofdm(t) ? (t->bandwidth_hz ? t->bandwidth_hz : 8000000) : 0);
+            sb_printf(o, ", \"rolloff\": %.2f, \"plp\": %d", is_ofdm(t) || t->delivery_system == SYS_DVBC_ANNEX_A ? 0.0 : rolloff_of(t),
+                      t->stream_id);
+        }
+        if (b->mt) {
+            drx_rx_stats s;
+            drx_mt_get_stats(b->mt, &s);
+            char rate[16] = "";
+            if (s.rate) {
+                snprintf(rate, sizeof(rate), "%s", s.rate);
+                for (char* c = rate; *c; c++)
+                    if (*c == '_')
+                        *c = '/';
+            }
+            sb_printf(o, ", \"locked\": %s, ", s.locked ? "true" : "false");
+            sb_num(o, "snr_db", s.snr_db > 0 ? s.snr_db : NAN, 2);
+            sb_printf(o, ", ");
+            sb_num(o, "freq_offset_hz", s.freq * b->symrate, 0);
+            sb_printf(o, ", \"modulation\": %s%s%s, \"code_rate\": %s%s%s", s.constellation ? "\"" : "",
+                      s.constellation ? s.constellation : "null", s.constellation ? "\"" : "", rate[0] ? "\"" : "",
+                      rate[0] ? rate : "null", rate[0] ? "\"" : "");
+            if (b->tune.delivery_system == SYS_DVBS2)
+                sb_printf(o, ", \"pilots\": %s", s.pilots ? "true" : "false");
+            sb_printf(o, ", \"ts_packets\": %llu, \"ts_errors\": %llu, ", (unsigned long long)s.ts_packets,
+                      (unsigned long long)s.ts_crc_errors);
+            sb_num(o, "ts_mbps", b->ts_mbps, 2);
+            sb_printf(o, ", \"fec_blocks\": %llu, \"fec_errors\": %llu, ", (unsigned long long)s.plframes,
+                      (unsigned long long)s.bch_failed);
+            sb_num(o, "uptime", now() - b->t0, 1);
+        }
+        sb_printf(o, "}");
+    }
+    sb_printf(o, "]}");
+}
+
+/* Releases a probe or the monitor (lock held). */
+static void ctl_release(struct bridge* b)
+{
+    if (b->mode == 2 && !b->mt) { /* level-only monitor: the radio alone */
+        radio_stop(b->radio);
+        b->radio->sink = NULL;
+    } else {
+        bridge_stop_rx(b);
+    }
+    b->mode = 0;
+    psi_free(b->psi);
+    b->psi = NULL;
+}
+
+/* A tuning request from JSON (the frequency is what the B210 sees). */
+static int tune_of(const char* req, struct dvbrx_tune* t, char* err, size_t errn)
+{
+    char sys[16];
+    memset(t, 0, sizeof(*t));
+    json_str(req, "delsys", sys, sizeof(sys));
+    t->delivery_system = !strcmp(sys, "DVB-S")    ? SYS_DVBS
+                         : !strcmp(sys, "DVB-S2") ? SYS_DVBS2
+                         : !strcmp(sys, "DVB-C")  ? SYS_DVBC_ANNEX_A
+                         : !strcmp(sys, "DVB-T")  ? SYS_DVBT
+                         : !strcmp(sys, "DVB-T2") ? SYS_DVBT2
+                                                  : 0;
+    if (!t->delivery_system) {
+        snprintf(err, errn, "unknown delsys \"%s\"", sys);
+        return -1;
+    }
+    t->frequency_khz = (uint32_t)llround(json_num(req, "freq", 0) / 1e3);
+    t->symbol_rate = (uint32_t)llround(json_num(req, "symbol_rate", 0));
+    t->bandwidth_hz = (uint32_t)llround(json_num(req, "bandwidth", 0));
+    if (!t->bandwidth_hz)
+        t->bandwidth_hz = 8000000;
+    const double ro = json_num(req, "rolloff", 0.2);
+    t->rolloff = ro < 0.075 ? ROLLOFF_5 : ro < 0.125 ? ROLLOFF_10 : ro < 0.175 ? ROLLOFF_15
+                 : ro < 0.225 ? ROLLOFF_20 : ro < 0.3 ? ROLLOFF_25 : ROLLOFF_35;
+    t->stream_id = (int32_t)json_num(req, "plp", -1);
+    t->inversion = INVERSION_AUTO;
+    t->modulation = QAM_AUTO;
+    char mod[16];
+    if (json_str(req, "modulation", mod, sizeof(mod)) && t->delivery_system == SYS_DVBC_ANNEX_A) {
+        const int q = atoi(mod + (strncmp(mod, "QAM", 3) ? 0 : 3));
+        t->modulation = q == 16 ? QAM_16 : q == 32 ? QAM_32 : q == 64 ? QAM_64 : q == 128 ? QAM_128
+                        : q == 256 ? QAM_256 : QAM_AUTO;
+    }
+    if (!t->frequency_khz) {
+        snprintf(err, errn, "missing freq");
+        return -1;
+    }
+    return 0;
+}
+
+static void discard_sink(void* ctx, const float* iq, int n)
+{
+    (void)ctx;
+    (void)iq;
+    (void)n;
+}
+
+#ifdef HAVE_UHD
+/* n samples at freq/rate on an idle radio (lock held); gain < 0: auto. */
+static int radio_capture(struct radio* r, double freq, double rate, double gain, double bw, int n,
+                         float* out, double* level)
+{
+    const double g0 = r->gain, bwo = r->bw_opt, bwn = r->bw_need;
+    const int auto_g = gain < 0;
+    r->gain = auto_g ? 30 : gain;
+    r->bw_opt = bw > 0 ? bw : -1;
+    r->bw_need = 0; /* bw 0: the whole capture */
+    if (radio_configure(r, freq, rate) <= 0) {
+        r->gain = g0;
+        r->bw_opt = bwo;
+        r->bw_need = bwn;
+        return -1;
+    }
+    size_t spb = 0;
+    uhd_rx_streamer_max_num_samps(r->rx, &spb);
+    for (int pass = 0; pass < (auto_g ? 3 : 1); pass++) {
+        const int skip = (int)(0.02 * r->rate) + 4096;
+        const int want = pass < (auto_g ? 2 : 0) ? 16384 : n;
+        uhd_stream_cmd_t cmd = { .stream_mode = UHD_STREAM_MODE_START_CONTINUOUS, .stream_now = true };
+        uhd_rx_streamer_issue_stream_cmd(r->rx, &cmd);
+        int got = -skip;
+        float tmp[2 * 8192];
+        double p = 0;
+        while (got < want) {
+            size_t k = 0;
+            void* ptr = got < 0 ? (void*)tmp : (void*)(out + 2 * got);
+            size_t room = got < 0 ? 8192 : (size_t)(want - got);
+            if (room > spb)
+                room = spb;
+            uhd_rx_streamer_recv(r->rx, &ptr, room, &r->md, 1.0, false, &k);
+            if (!k)
+                break;
+            if (got >= 0)
+                for (size_t i = 0; i < 2 * k; i++)
+                    p += (double)out[2 * got + i] * out[2 * got + i];
+            got += (int)k;
+        }
+        cmd.stream_mode = UHD_STREAM_MODE_STOP_CONTINUOUS;
+        uhd_rx_streamer_issue_stream_cmd(r->rx, &cmd);
+        /* drain what was in flight */
+        for (int d = 0; d < 50; d++) {
+            size_t k = 0;
+            void* ptr = tmp;
+            uhd_rx_streamer_recv(r->rx, &ptr, 8192, &r->md, 0.01, false, &k);
+            if (!k)
+                break;
+        }
+        if (got < want)
+            return -1;
+        const double dbfs = 10 * log10(p / want + 1e-20);
+        *level = dbfs;
+        if (pass < (auto_g ? 2 : 0)) {
+            double g = r->gain + fmax(-20, fmin(20, -24 - dbfs));
+            g = fmax(0, fmin(r->gain_max, round(g)));
+            uhd_usrp_set_rx_gain(r->usrp, g, 0, "");
+            uhd_usrp_get_rx_gain(r->usrp, 0, "", &g);
+            r->gain = g;
+        }
+    }
+    r->bw_opt = bwo;
+    r->bw_need = bwn;
+    (void)g0;
+    return 0;
+}
+#endif
+
+static void b64(struct sbuf* o, const uint8_t* d, size_t n)
+{
+    static const char T[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    char q[5] = { 0 };
+    for (size_t i = 0; i < n; i += 3) {
+        const uint32_t v = (uint32_t)d[i] << 16 | (i + 1 < n ? (uint32_t)d[i + 1] << 8 : 0) | (i + 2 < n ? d[i + 2] : 0);
+        q[0] = T[v >> 18];
+        q[1] = T[(v >> 12) & 63];
+        q[2] = i + 1 < n ? T[(v >> 6) & 63] : '=';
+        q[3] = i + 2 < n ? T[v & 63] : '=';
+        sb_printf(o, "%s", q);
+    }
+}
+
+static void ctl_request(const char* req, struct sbuf* o)
+{
+    char cmd[32], err[128] = "";
+    json_str(req, "cmd", cmd, sizeof(cmd));
+    const int ai = (int)json_num(req, "adapter", 0);
+    struct bridge* b = &ctl_b[ai >= 0 && ai < ctl_n ? ai : 0];
+    const int force = json_bool(req, "force", 0);
+    if (!strcmp(cmd, "status")) {
+        pthread_mutex_lock(&ctl_lock);
+        ctl_last_status = now();
+        status_json(o);
+        pthread_mutex_unlock(&ctl_lock);
+        return;
+    }
+    if (!strcmp(cmd, "constellation")) {
+        int max = (int)json_num(req, "points", 2048);
+        max = max < 1 ? 1 : max > 4096 ? 4096 : max;
+        float* iq = malloc(sizeof(float) * 2 * max);
+        pthread_mutex_lock(&ctl_lock);
+        const int n = b->mt && iq ? drx_mt_constellation(b->mt, iq, max) : 0;
+        drx_rx_stats s = { 0 };
+        if (b->mt)
+            drx_mt_get_stats(b->mt, &s);
+        pthread_mutex_unlock(&ctl_lock);
+        sb_printf(o, "{\"ok\": true, \"modulation\": %s%s%s, ", s.constellation ? "\"" : "",
+                  s.constellation ? s.constellation : "null", s.constellation ? "\"" : "");
+        sb_num(o, "snr_db", s.snr_db > 0 ? s.snr_db : NAN, 2);
+        sb_printf(o, ", \"points\": [");
+        for (int i = 0; i < n; i++)
+            sb_printf(o, "%s[%.3f,%.3f]", i ? "," : "", iq[2 * i], iq[2 * i + 1]);
+        sb_printf(o, "]}");
+        free(iq);
+        return;
+    }
+    if (!strcmp(cmd, "lnb")) {
+        pthread_mutex_lock(&ctl_lock);
+        struct lnb* l = b->lnb && b->lnb->fd >= 0 ? b->lnb : NULL;
+        char v[8];
+        int rc = 0;
+        if (!l) {
+            snprintf(err, sizeof(err), "no LNB controller");
+        } else {
+            if (json_str(req, "volt", v, sizeof(v))) {
+                l->voltage = !strcmp(v, "13") ? SEC_VOLTAGE_13 : !strcmp(v, "18") ? SEC_VOLTAGE_18 : SEC_VOLTAGE_OFF;
+                char c[16];
+                snprintf(c, sizeof(c), "VOLT %s", !strcmp(v, "13") ? "13" : !strcmp(v, "18") ? "18" : "OFF");
+                rc |= lnb_command(l, c);
+            }
+            if (json_val(req, "tone")) {
+                const int tone = json_bool(req, "tone", 0);
+                l->tone = tone ? SEC_TONE_ON : SEC_TONE_OFF;
+                rc |= lnb_command(l, tone ? "TONE ON" : "TONE OFF");
+            }
+            if (rc)
+                snprintf(err, sizeof(err), "LNB controller error");
+        }
+        pthread_mutex_unlock(&ctl_lock);
+        if (err[0])
+            sb_printf(o, "{\"ok\": false, \"error\": \"%s\"}", err);
+        else
+            sb_printf(o, "{\"ok\": true}");
+        return;
+    }
+    /* the commands below take the radio */
+    if (!strcmp(cmd, "capture") || !strcmp(cmd, "probe") || !strcmp(cmd, "monitor")) {
+        char action[16] = "start";
+        json_str(req, "action", action, sizeof(action));
+        pthread_mutex_lock(&ctl_lock);
+        if (!strcmp(cmd, "monitor") && !strcmp(action, "stop")) {
+            if (b->mode == 2)
+                ctl_release(b);
+            pthread_mutex_unlock(&ctl_lock);
+            sb_printf(o, "{\"ok\": true}");
+            return;
+        }
+        if (b->hub || b->radio->file) {
+            pthread_mutex_unlock(&ctl_lock);
+            sb_printf(o, "{\"ok\": false, \"error\": \"not available %s\"}",
+                      b->hub ? "with several adapters on one capture" : "on a file source");
+            return;
+        }
+        if (app_busy(b) && !force) {
+            pthread_mutex_unlock(&ctl_lock);
+            sb_printf(o, "{\"ok\": false, \"error\": \"busy\"}");
+            return;
+        }
+        /* the application's reception (forced) or a previous probe/monitor */
+        if (b->mode)
+            ctl_release(b);
+        else if (b->mt)
+            bridge_stop_rx(b);
+        char ant[16];
+        const char* ant0 = b->radio->antenna;
+        if (json_str(req, "antenna", ant, sizeof(ant)) && ant[0])
+            b->radio->antenna = ant;
+        if (!strcmp(cmd, "capture")) {
+#ifdef HAVE_UHD
+            int n = (int)json_num(req, "samples", 65536);
+            n = n < 1024 ? 1024 : n > 1048576 ? 1048576 : n;
+            const char* gv = json_val(req, "gain");
+            const double gain = gv && *gv == '"' ? -1 : json_num(req, "gain", -1);
+            float* iq = malloc(sizeof(float) * 2 * n);
+            double level = NAN;
+            const int rc = iq ? radio_capture(b->radio, json_num(req, "freq", 0), json_num(req, "rate", 20e6), gain,
+                                              json_num(req, "bandwidth", 0), n, iq, &level)
+                              : -1;
+            const double f = b->radio->freq, rate = b->radio->rate, g = b->radio->gain;
+            b->radio->antenna = ant0;
+            pthread_mutex_unlock(&ctl_lock);
+            if (rc) {
+                sb_printf(o, "{\"ok\": false, \"error\": \"capture failed\"}");
+            } else {
+                sb_printf(o, "{\"ok\": true, \"freq\": %.0f, \"rate\": %.0f, \"gain\": %.1f, \"level_dbfs\": %.2f, \"iq\": \"", f,
+                          rate, g, level);
+                b64(o, (const uint8_t*)iq, sizeof(float) * 2 * (size_t)n);
+                sb_printf(o, "\"}");
+            }
+            free(iq);
+#else
+            pthread_mutex_unlock(&ctl_lock);
+            sb_printf(o, "{\"ok\": false, \"error\": \"built without UHD\"}");
+#endif
+            return;
+        }
+        struct dvbrx_tune t;
+        const double sr = json_num(req, "symbol_rate", 0);
+        if (!strcmp(cmd, "monitor") && sr <= 0 && !strstr(req, "DVB-T")) {
+            /* level only: the radio at the frequency, samples discarded */
+            b->mode = 2;
+            b->tune = (struct dvbrx_tune){ .delivery_system = SYS_DVBS2,
+                                           .frequency_khz = (uint32_t)llround(json_num(req, "freq", 0) / 1e3) };
+            b->radio->bw_need = 4e6;
+            if (radio_configure(b->radio, json_num(req, "freq", 0), 8e6) > 0) {
+                b->radio->sink = discard_sink;
+                radio_start(b->radio, NULL);
+            }
+            b->radio->antenna = ant0;
+            pthread_mutex_unlock(&ctl_lock);
+            sb_printf(o, "{\"ok\": true}");
+            return;
+        }
+        if (tune_of(req, &t, err, sizeof(err))) {
+            b->radio->antenna = ant0;
+            pthread_mutex_unlock(&ctl_lock);
+            sb_printf(o, "{\"ok\": false, \"error\": \"%s\"}", err);
+            return;
+        }
+        b->mode = !strcmp(cmd, "probe") ? 1 : 2;
+        b->psi = b->mode == 1 ? psi_new() : NULL;
+        bridge_tune(b, &t);
+        b->radio->antenna = ant0;
+        const uint64_t gen = b->gen;
+        const int ok = b->mt != NULL;
+        pthread_mutex_unlock(&ctl_lock);
+        if (!ok) {
+            pthread_mutex_lock(&ctl_lock);
+            ctl_release(b);
+            pthread_mutex_unlock(&ctl_lock);
+            sb_printf(o, "{\"ok\": false, \"error\": \"tuning failed\"}");
+            return;
+        }
+        if (b->mode == 2) {
+            sb_printf(o, "{\"ok\": true}");
+            return;
+        }
+        /* probe: let it lock and collect, then report */
+        const double secs = fmax(1, fmin(60, json_num(req, "seconds", 6)));
+        const double t_end = now() + secs;
+        double t_lock = 0;
+        while (now() < t_end) {
+            usleep(200000);
+            pthread_mutex_lock(&ctl_lock);
+            const int same = b->gen == gen && b->mode == 1;
+            drx_rx_stats s = { 0 };
+            if (same && b->mt)
+                drx_mt_get_stats(b->mt, &s);
+            pthread_mutex_unlock(&ctl_lock);
+            if (!same)
+                break;
+            if (s.ts_packets > 0 && !t_lock)
+                t_lock = now();
+            /* locked and the tables seen for 3 s: enough */
+            if (t_lock && now() - t_lock > 3.0 && b->radio->agc_state != 1)
+                break;
+        }
+        pthread_mutex_lock(&ctl_lock);
+        if (b->gen != gen || b->mode != 1) {
+            pthread_mutex_unlock(&ctl_lock);
+            sb_printf(o, "{\"ok\": false, \"error\": \"interrupted by the application\"}");
+            return;
+        }
+        drx_rx_stats s;
+        drx_mt_get_stats(b->mt, &s);
+        const double dt = now() - b->t0, gain = b->radio->gain, level = b->radio->level_dbfs;
+        const double off = s.freq * b->symrate;
+        struct psi_result* pr = malloc(sizeof(*pr));
+        if (pr)
+            psi_result_get(b->psi, pr);
+        ctl_release(b);
+        pthread_mutex_unlock(&ctl_lock);
+        char rate[16] = "";
+        if (s.rate) {
+            snprintf(rate, sizeof(rate), "%s", s.rate);
+            for (char* c = rate; *c; c++)
+                if (*c == '_')
+                    *c = '/';
+        }
+        sb_printf(o, "{\"ok\": true, \"locked\": %s, ", s.ts_packets > 0 ? "true" : "false");
+        sb_num(o, "snr_db", s.snr_db > 0 ? s.snr_db : NAN, 2);
+        sb_printf(o, ", ");
+        sb_num(o, "freq_offset_hz", off, 0);
+        sb_printf(o, ", \"modulation\": %s%s%s, \"code_rate\": %s%s%s, ", s.constellation ? "\"" : "",
+                  s.constellation ? s.constellation : "null", s.constellation ? "\"" : "", rate[0] ? "\"" : "",
+                  rate[0] ? rate : "null", rate[0] ? "\"" : "");
+        sb_num(o, "ts_mbps", dt > 0 ? s.ts_packets * 1504.0 / dt / 1e6 : NAN, 2);
+        sb_printf(o, ", \"ts_errors\": %llu, \"fec_blocks\": %llu, \"fec_errors\": %llu, ",
+                  (unsigned long long)s.ts_crc_errors, (unsigned long long)s.plframes,
+                  (unsigned long long)s.bch_failed);
+        sb_num(o, "gain", gain, 1);
+        sb_printf(o, ", ");
+        sb_num(o, "level_dbfs", level, 1);
+        if (pr) {
+            sb_printf(o, ", \"tsid\": %d, \"onid\": %d, \"network\": \"%s\", \"services\": [", pr->tsid, pr->onid,
+                      pr->network);
+            for (int i = 0; i < pr->nservices; i++) {
+                const struct psi_service* v = &pr->services[i];
+                sb_printf(o, "%s{\"sid\": %d, \"name\": \"%s\", \"provider\": \"%s\", \"type\": %d, \"scrambled\": %s}",
+                          i ? ", " : "", v->sid, v->name, v->provider, v->type, v->scrambled ? "true" : "false");
+            }
+            sb_printf(o, "], \"nit\": [");
+            for (int i = 0; i < pr->nmuxes; i++) {
+                const struct psi_mux* m = &pr->muxes[i];
+                sb_printf(o, "%s{\"delsys\": \"%s\", \"freq\": %.0f, \"symbol_rate\": %.0f, \"bandwidth\": %.0f, "
+                             "\"modulation\": \"%s%d\", \"tsid\": %d, \"plp\": %d, \"polarization\": \"%c\"}",
+                          i ? ", " : "", m->delsys, m->freq, m->symbol_rate, m->bandwidth, m->modulation ? "QAM" : "",
+                          m->modulation, m->tsid, m->plp, m->polarization ? m->polarization : '-');
+            }
+            sb_printf(o, "]");
+            free(pr);
+        }
+        sb_printf(o, "}");
+        return;
+    }
+    sb_printf(o, "{\"ok\": false, \"error\": \"unknown cmd \\\"%s\\\"\"}", cmd);
+}
+
+static void* ctl_client(void* arg)
+{
+    const int fd = (int)(intptr_t)arg;
+    char* line = malloc(65536);
+    size_t n = 0;
+    while (line) {
+        const ssize_t k = read(fd, line + n, 65535 - n);
+        if (k <= 0)
+            break;
+        n += (size_t)k;
+        char* nl;
+        while ((nl = memchr(line, '\n', n))) {
+            *nl = 0;
+            struct sbuf o = { 0 };
+            ctl_request(line, &o);
+            sb_printf(&o, "\n");
+            for (size_t w = 0; o.s && w < o.n;) {
+                const ssize_t m = write(fd, o.s + w, o.n - w);
+                if (m <= 0)
+                    break;
+                w += (size_t)m;
+            }
+            free(o.s);
+            n -= (size_t)(nl + 1 - line);
+            memmove(line, nl + 1, n);
+        }
+        if (n == 65535)
+            n = 0; /* too long a line */
+    }
+    free(line);
+    close(fd);
+    return NULL;
+}
+
+static void* ctl_server(void* arg)
+{
+    const int lfd = (int)(intptr_t)arg;
+    while (!stop) {
+        const int fd = accept(lfd, NULL, NULL);
+        if (fd < 0) {
+            if (errno == EINTR)
+                continue;
+            break;
+        }
+        pthread_t t;
+        if (pthread_create(&t, NULL, ctl_client, (void*)(intptr_t)fd))
+            close(fd);
+        else
+            pthread_detach(t);
+    }
+    return NULL;
+}
+
+/* Opens the control socket (0660, mode of the directory's group). */
+static int ctl_open(const char* path, struct bridge* b, int n)
+{
+    ctl_b = b;
+    ctl_n = n;
+    struct sockaddr_un a = { .sun_family = AF_UNIX };
+    if (strlen(path) >= sizeof(a.sun_path))
+        return -1;
+    strcpy(a.sun_path, path);
+    unlink(path);
+    const int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0 || bind(fd, (struct sockaddr*)&a, sizeof(a)) || listen(fd, 8)) {
+        perror(path);
+        if (fd >= 0)
+            close(fd);
+        return -1;
+    }
+    chmod(path, 0660);
+    pthread_t t;
+    pthread_create(&t, NULL, ctl_server, (void*)(intptr_t)fd);
+    pthread_detach(t);
+    fprintf(stderr, "control socket %s\n", path);
+    return 0;
+}
+
 #define LOCK_HOLD 1.0 /* seconds */
 
 static void bridge_status(struct bridge* b)
@@ -1219,12 +1905,20 @@ static void bridge_event(struct bridge* b)
     if (read(b->ctl, &ev, sizeof(ev)) != sizeof(ev))
         return;
     if (ev.type == DVBRX_EV_TUNE) {
+        pthread_mutex_lock(&ctl_lock);
+        if (b->mode) /* the application comes first */
+            ctl_release(b);
         bridge_tune(b, &ev.tune);
+        pthread_mutex_unlock(&ctl_lock);
     } else if (ev.type == DVBRX_EV_SLEEP) {
-        if (b->hub)
-            fprintf(stderr, "adapter %d: ", b->index);
-        fprintf(stderr, "frontend closed: stopping\n");
-        bridge_stop_rx(b);
+        pthread_mutex_lock(&ctl_lock);
+        if (!b->mode) { /* a probe or the monitor is not the application's */
+            if (b->hub)
+                fprintf(stderr, "adapter %d: ", b->index);
+            fprintf(stderr, "frontend closed: stopping\n");
+            bridge_stop_rx(b);
+        }
+        pthread_mutex_unlock(&ctl_lock);
     } else {
         struct dvbrx_reply r = { .seq = ev.seq, .result = lnb_event(b, &ev) };
         if (ioctl(b->ctl, DVBRX_IOC_REPLY, &r))
@@ -1250,6 +1944,17 @@ static int run_bridges(struct bridge* b, int n)
         }
         fprintf(stderr, "bridge: serving /dev/dvb through %s\n", path);
         b[i].last_print = b[i].t0 = now();
+        b[i].ts_mbps = NAN;
+    }
+    if (ctl_path && ctl_path[0]) {
+        char def[64];
+        const char* cp = ctl_path;
+        if (!strcmp(cp, "default")) {
+            snprintf(def, sizeof(def), "/run/dvbrx/dvbrx-%d.sock", b[0].index);
+            cp = def;
+        }
+        ctl_last_status = now();
+        ctl_open(cp, b, n);
     }
     while (!stop) {
         for (int i = 0; i < n; i++)
@@ -1258,9 +1963,11 @@ static int run_bridges(struct bridge* b, int n)
             for (int i = 0; i < n; i++)
                 if (p[i].revents & POLLIN)
                     bridge_event(&b[i]);
+        pthread_mutex_lock(&ctl_lock);
         for (int i = 0; i < n; i++) {
             if (now() - b[i].last_status >= 0.2) {
-                bridge_status(&b[i]);
+                if (!b[i].mode) /* the application sees its own reception only */
+                    bridge_status(&b[i]);
                 b[i].last_status = now();
             }
             if (b[i].mt && now() - b[i].last_print >= 2.0) {
@@ -1270,7 +1977,27 @@ static int run_bridges(struct bridge* b, int n)
                 print_stats(b[i].mt, b[i].radio, b[i].t0, b[i].symrate, tag);
                 b[i].last_print = now();
             }
+            /* TS rate for the control socket, over about 2 s */
+            const double t = now();
+            if (b[i].mt && t - b[i].rate_t >= 2.0) {
+                drx_rx_stats s;
+                drx_mt_get_stats(b[i].mt, &s);
+                b[i].ts_mbps = b[i].rate_t > 0 && s.ts_packets >= b[i].rate_pk
+                                   ? (s.ts_packets - b[i].rate_pk) * 1504.0 / (t - b[i].rate_t) / 1e6
+                                   : NAN;
+                b[i].rate_t = t;
+                b[i].rate_pk = s.ts_packets;
+            } else if (!b[i].mt) {
+                b[i].rate_t = 0;
+                b[i].ts_mbps = NAN;
+            }
+            /* a monitor nobody looks at any more */
+            if (b[i].mode == 2 && t - ctl_last_status > 30) {
+                fprintf(stderr, "monitor: no status request for 30 s, stopping\n");
+                ctl_release(&b[i]);
+            }
         }
+        pthread_mutex_unlock(&ctl_lock);
     }
     for (int i = 0; i < n; i++) {
         bridge_stop_rx(&b[i]);
@@ -1479,7 +2206,7 @@ int main(int argc, char** argv)
     char* multi[MAX_MULTI];
     int nmulti = 0;
     int opt;
-    while ((opt = getopt(argc, argv, "u:F:f:S:G:A:B:M:s:r:D:g:i:o:t:Rd:L:l:c:T:2:n:W:x:m:")) != -1) {
+    while ((opt = getopt(argc, argv, "u:F:f:S:G:A:B:C:P:M:s:r:D:g:i:o:t:Rd:L:l:c:T:2:n:W:x:m:")) != -1) {
         switch (opt) {
         case 'u': radio.uhd_args = optarg; break;
         case 'F': radio.file = optarg; break;
@@ -1493,6 +2220,8 @@ int main(int argc, char** argv)
             break;
         case 'A': radio.antenna = optarg; break;
         case 'B': radio.bw_opt = atof(optarg); break;
+        case 'C': ctl_path = optarg; break;
+        case 'P': ctl_input_offset = atof(optarg); break;
         case 'M': radio.mcr = atof(optarg); break;
         case 's': symrate = atof(optarg); break;
         case 'r': rolloff = (float)atof(optarg); break;

@@ -47,6 +47,10 @@ typedef void (*drx_dvbc_cb)(void* ctx, const uint8_t* ts, int len);
 drx_dvbc* drx_dvbc_new(enum drx_qam qam);
 void drx_dvbc_free(drx_dvbc* d);
 
+/* Constellation tap (see drx_mt_constellation()), NULL: none. */
+struct drx_tap;
+void drx_dvbc_set_tap(drx_dvbc* d, struct drx_tap* tap);
+
 /* Spectral inversion, as enum fe_spectral_inversion: 0 normal, 1 inverted,
  * 2 auto (the default: each failed acquisition round, i.e. after the
  * constellations to try, switches it; cable networks carry both). */

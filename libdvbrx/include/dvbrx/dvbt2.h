@@ -51,6 +51,10 @@ typedef void (*drx_dvbt2_cb)(void* ctx, const uint8_t* ts, int len);
 drx_dvbt2* drx_dvbt2_new(double sample_rate, double bandwidth, int plp_id);
 void drx_dvbt2_free(drx_dvbt2* d);
 
+/* Constellation tap (see drx_mt_constellation()), NULL: none. */
+struct drx_tap;
+void drx_dvbt2_set_tap(drx_dvbt2* d, struct drx_tap* tap);
+
 /* Feed n complex samples (interleaved I/Q). */
 void drx_dvbt2_process(drx_dvbt2* d, const float* iq, int n, drx_dvbt2_cb cb, void* ctx);
 

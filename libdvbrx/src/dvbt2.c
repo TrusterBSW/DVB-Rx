@@ -31,6 +31,7 @@
  * closing symbol.
  */
 #include "dvbrx/dvbt2.h"
+#include "tap.h"
 #include "dvbrx/bb.h"
 #include "dvbrx/fec.h"
 #include "dvbrx/ldpc.h"
@@ -605,6 +606,7 @@ struct fecwork {
 };
 
 struct drx_dvbt2 {
+    struct drx_tap* tap; /* constellation, or NULL */
     double in_rate, elem_rate;
     int want_plp;
     struct resamp rs;
@@ -779,6 +781,8 @@ drx_dvbt2* drx_dvbt2_new(double sample_rate, double bandwidth, int plp_id)
     d->sel = -1;
     return d;
 }
+
+void drx_dvbt2_set_tap(drx_dvbt2* d, struct drx_tap* tap) { d->tap = tap; }
 
 void drx_dvbt2_free(drx_dvbt2* d)
 {
@@ -1244,6 +1248,8 @@ static void store_cells(drx_dvbt2* d, const int* carriers, int nc, const int* hi
         cells[q] = xd[j];
         csi[q] = hc[j];
     }
+    if (grid && drx_tap_on(d->tap)) /* data symbols */
+        drx_tap_put(d->tap, (const float*)cells, lim, 16);
 }
 
 /* The data symbol estimates start from the channel of the last P2 symbol
