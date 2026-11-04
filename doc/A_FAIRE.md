@@ -32,7 +32,12 @@ T, T2, C et le frontal.
 
 ## Scan
 
-- **Page web de scan du câble** (et de l'antenne) : balayage de bande SDR
+- **dvbrx-web** (`apps/dvbrx-web`) fait le balayage FFT, le scan complet et l'export
+  tvheadend. Reste à faire : le **DAB** ; dans la réponse `probe`, la FFT, la garde et le
+  pilot pattern du DVB-T/T2, la **liste des PLP** d'un multiplex T2 (L1-post) et les
+  paramètres effectifs du DVB-T (hiérarchie) ; le contrôle **DiSEqC** (commutateur, moteur)
+  dans la page d'alignement et le scan satellite.
+- *(historique)* **Page web de scan du câble** (et de l'antenne) : balayage de bande SDR
   (fenêtres de 56 MHz, classement QAM/OFDM par la raie cyclique et le
   préfixe cyclique, estimation du débit symbole), puis accrochage et lecture
   des tables (NIT, SDT) pour sortir les fréquences et les paramètres DVB-C,

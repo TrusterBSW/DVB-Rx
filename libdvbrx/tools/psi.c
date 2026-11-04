@@ -341,3 +341,9 @@ void psi_result_get(const psi* p, struct psi_result* r)
         }
     }
 }
+
+void psi_pid_count(const psi* p, int pid, uint32_t* packets, uint32_t* scrambled)
+{
+    *packets = p->npk[pid & 0x1fff];
+    *scrambled = p->nscr[pid & 0x1fff];
+}

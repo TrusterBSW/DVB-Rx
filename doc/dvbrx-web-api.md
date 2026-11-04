@@ -89,7 +89,9 @@ Requête :
   tables du flux :
 
 ```json
-{"ok": true, "locked": true, "snr_db": 31.0, "freq_offset_hz": 900,
+{"ok": true, "locked": true, "delsys": "DVB-C", "symbol_rate": 6875000, "bandwidth": 0,
+ "rolloff": 0, "plp": -1, "pids": [[0, 3012, 0], [18, 1450, 0], [101, 412833, 411902]],
+ "snr_db": 31.0, "freq_offset_hz": 900,
  "modulation": "QAM64", "code_rate": null, "ts_mbps": 36.2, "ts_errors": 17,
  "gain": 37, "level_dbfs": -24.6,
  "tsid": 4500, "onid": 64810, "network": "",
@@ -99,6 +101,8 @@ Requête :
           "modulation": "QAM64", "tsid": 4500}]}
 ```
 
+- **`pids`** : `[pid, paquets, paquets brouillés]` de chaque PID vu. Un flux fait uniquement des PID
+  0x1FFE/0x1FFF est du DOCSIS. `pilots` (booléen) n'apparaît qu'en DVB-S2.
 - **`nit`** : multiplex annoncés par la NIT s'il y en a une, sinon `[]`.
 - **`scrambled`** : vrai si les paquets vidéo et audio du service sont brouillés, quoi qu'en dise la SDT.
 
@@ -106,7 +110,9 @@ Requête :
 
 Requête : `{"cmd": "lnb", "volt": "13|18|off", "tone": true}`
 
-Réponse : `{"ok": true}`, ou `"error": "no LNB controller"` sans `-L`.
+Réponse : `{"ok": true}`, ou `"error": "no LNB controller"` sans `-L`. Commande exclusive :
+`"error": "busy"` quand une application est accordée (changer la polarisation couperait sa
+réception), sauf avec `"force": true`.
 
 ## monitor (radio libre, pour l'alignement)
 
@@ -120,6 +126,6 @@ Démarrage :
 Arrêt : `{"cmd": "monitor", "action": "stop"}`
 
 - **Fonctionnement** : la commande garde un récepteur sur cette porteuse jusqu'à `stop`. Il est visible dans `status` comme
-  canal `"state": "monitor"`, avec niveau, gain et SNR.
+  canal `"state": "monitor"`, avec `level_dbfs`, `input_dbm`, `gain` et SNR.
 - **Symbole inconnu** : avec `"symbol_rate": 0`, seul le niveau est mesuré (puissance dans ±2 MHz).
 - **Fin automatique** : 30 s sans requête `status` arrêtent le moniteur, pour qu'une page fermée ne garde pas la radio.

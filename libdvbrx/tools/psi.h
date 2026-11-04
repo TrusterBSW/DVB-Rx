@@ -44,5 +44,7 @@ void psi_free(psi* p);
 /* Feed TS packets (len a multiple of 188). */
 void psi_feed(psi* p, const uint8_t* ts, int len);
 void psi_result_get(const psi* p, struct psi_result* r);
+/* Packets seen on pid (and how many scrambled). */
+void psi_pid_count(const psi* p, int pid, uint32_t* packets, uint32_t* scrambled);
 
 #endif

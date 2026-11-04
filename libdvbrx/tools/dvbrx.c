@@ -1396,6 +1396,14 @@ static void status_json(struct sbuf* o)
                       (unsigned long long)s.bch_failed);
             sb_num(o, "uptime", now() - b->t0, 1);
         }
+        if (b->mt || b->mode == 2) { /* the radio's level, for this channel */
+            sb_printf(o, ", ");
+            sb_num(o, "gain", r->file ? NAN : r->gain, 1);
+            sb_printf(o, ", ");
+            sb_num(o, "level_dbfs", running ? r->level_dbfs : NAN, 1);
+            sb_printf(o, ", ");
+            sb_num(o, "input_dbm", running && !r->file ? r->level_dbfs - r->gain + ctl_input_offset : NAN, 1);
+        }
         sb_printf(o, "}");
     }
     sb_printf(o, "]}");
@@ -1586,6 +1594,8 @@ static void ctl_request(const char* req, struct sbuf* o)
         int rc = 0;
         if (!l) {
             snprintf(err, sizeof(err), "no LNB controller");
+        } else if (app_busy(b) && !force) { /* would cut what the application receives */
+            snprintf(err, sizeof(err), "busy");
         } else {
             if (json_str(req, "volt", v, sizeof(v))) {
                 l->voltage = !strcmp(v, "13") ? SEC_VOLTAGE_13 : !strcmp(v, "18") ? SEC_VOLTAGE_18 : SEC_VOLTAGE_OFF;
@@ -1714,6 +1724,8 @@ static void ctl_request(const char* req, struct sbuf* o)
         const double secs = fmax(1, fmin(60, json_num(req, "seconds", 6)));
         const double t_end = now() + secs;
         double t_lock = 0;
+        uint64_t p_lock = 0;
+        drx_rx_stats good = { 0 }; /* the last stats in lock (an AGC step may unlock at the end) */
         while (now() < t_end) {
             usleep(200000);
             pthread_mutex_lock(&ctl_lock);
@@ -1724,8 +1736,12 @@ static void ctl_request(const char* req, struct sbuf* o)
             pthread_mutex_unlock(&ctl_lock);
             if (!same)
                 break;
-            if (s.ts_packets > 0 && !t_lock)
+            if (s.ts_packets > 0 && !t_lock) {
                 t_lock = now();
+                p_lock = s.ts_packets;
+            }
+            if (s.constellation && s.ts_packets > 0)
+                good = s;
             /* locked and the tables seen for 3 s: enough */
             if (t_lock && now() - t_lock > 3.0 && b->radio->agc_state != 1)
                 break;
@@ -1738,11 +1754,32 @@ static void ctl_request(const char* req, struct sbuf* o)
         }
         drx_rx_stats s;
         drx_mt_get_stats(b->mt, &s);
-        const double dt = now() - b->t0, gain = b->radio->gain, level = b->radio->level_dbfs;
+        if (!s.constellation && good.constellation) {
+            s.constellation = good.constellation;
+            s.rate = good.rate;
+            s.snr_db = good.snr_db;
+            s.freq = good.freq;
+            s.pilots = good.pilots;
+        }
+        /* TS rate since the lock (the acquisition would lower it) */
+        const int since_lock = t_lock && now() - t_lock > 1.0;
+        const double t_rate = since_lock ? now() - t_lock : now() - b->t0;
+        const uint64_t p_rate = since_lock ? p_lock : 0;
+        const double gain = b->radio->gain, level = b->radio->level_dbfs;
         const double off = s.freq * b->symrate;
         struct psi_result* pr = malloc(sizeof(*pr));
         if (pr)
             psi_result_get(b->psi, pr);
+        /* PIDs seen: [pid, packets, scrambled packets] */
+        struct sbuf pids = { 0 };
+        int npid = 0;
+        for (int pid = 0; pid < 8192; pid++) {
+            uint32_t np, ns;
+            psi_pid_count(b->psi, pid, &np, &ns);
+            if (np)
+                sb_printf(&pids, "%s[%d, %u, %u]", npid++ ? ", " : "", pid, np, ns);
+        }
+        const struct dvbrx_tune tt = b->tune;
         ctl_release(b);
         pthread_mutex_unlock(&ctl_lock);
         char rate[16] = "";
@@ -1752,14 +1789,22 @@ static void ctl_request(const char* req, struct sbuf* o)
                 if (*c == '_')
                     *c = '/';
         }
-        sb_printf(o, "{\"ok\": true, \"locked\": %s, ", s.ts_packets > 0 ? "true" : "false");
+        sb_printf(o, "{\"ok\": true, \"locked\": %s, \"delsys\": \"%s\", \"symbol_rate\": %u, \"bandwidth\": %u, "
+                     "\"rolloff\": %.2f, \"plp\": %d, ",
+                  s.ts_packets > 0 ? "true" : "false", delsys_name(tt.delivery_system), is_ofdm(&tt) ? 0 : tt.symbol_rate,
+                  is_ofdm(&tt) ? tt.bandwidth_hz : 0,
+                  is_ofdm(&tt) || tt.delivery_system == SYS_DVBC_ANNEX_A ? 0.0 : rolloff_of(&tt), tt.stream_id);
+        if (tt.delivery_system == SYS_DVBS2)
+            sb_printf(o, "\"pilots\": %s, ", s.pilots ? "true" : "false");
+        sb_printf(o, "\"pids\": [%s], ", pids.s ? pids.s : "");
+        free(pids.s);
         sb_num(o, "snr_db", s.snr_db > 0 ? s.snr_db : NAN, 2);
         sb_printf(o, ", ");
         sb_num(o, "freq_offset_hz", off, 0);
         sb_printf(o, ", \"modulation\": %s%s%s, \"code_rate\": %s%s%s, ", s.constellation ? "\"" : "",
                   s.constellation ? s.constellation : "null", s.constellation ? "\"" : "", rate[0] ? "\"" : "",
                   rate[0] ? rate : "null", rate[0] ? "\"" : "");
-        sb_num(o, "ts_mbps", dt > 0 ? s.ts_packets * 1504.0 / dt / 1e6 : NAN, 2);
+        sb_num(o, "ts_mbps", t_rate > 0 ? (s.ts_packets - p_rate) * 1504.0 / t_rate / 1e6 : NAN, 2);
         sb_printf(o, ", \"ts_errors\": %llu, \"fec_blocks\": %llu, \"fec_errors\": %llu, ",
                   (unsigned long long)s.ts_crc_errors, (unsigned long long)s.plframes,
                   (unsigned long long)s.bch_failed);
