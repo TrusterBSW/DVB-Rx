@@ -10,7 +10,9 @@
  *   demux, LNB commands go to the LNB controller (-L).
  *
  * Options:
- *   -u ARGS     UHD device arguments, e.g. "type=b200"
+ *   -u ARGS     SDR: "[DRIVER:]ARGS", DRIVER "uhd" (default; ARGS e.g.
+ *               "type=b200") or "bladerf" (ARGS: libbladeRF device string,
+ *               "" for the first one)
  *   -F FILE     fc32 IQ file (bridge mode: looped in real time, frequency
  *               ignored)
  *   -f HZ       centre frequency (standalone)
@@ -83,9 +85,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#ifdef HAVE_UHD
-#include <uhd.h>
-#endif
+#include "sdr.h"
 
 static volatile sig_atomic_t stop;
 static const char* ctl_path = "default"; /* -C: control socket, "" none */
@@ -105,14 +105,15 @@ static double now(void)
 /* ---- radio: a sample source feeding the receiver from its own thread --------- */
 
 struct radio {
-    const char* uhd_args;
+    const struct sdr_driver* drv; /* NULL: file source */
+    const char* dev_args;
     const char* file;
     int file_loop;     /* restart the file at its end */
     int file_realtime; /* pace the file at the sample rate, drop when late */
     double gain, mcr, gain_max;
-    int gain_auto; /* -G auto: gain from the measured level (UHD) */
+    int gain_auto; /* -G auto: gain from the measured level */
     double gain_cap; /* -G auto:MAX, 0: none */
-    double bw_opt;   /* -B: < 0 auto, 0 UHD's, > 0 fixed */
+    double bw_opt;   /* -B: < 0 auto, 0 the driver's, > 0 fixed */
     double bw_need;  /* auto: bandwidth to pass (channel or capture), 0: rate */
     double bw_set;   /* analog bandwidth obtained */
     volatile int agc_state; /* 0 level AGC, 1 best-SNR search, 2 best gain held */
@@ -133,11 +134,8 @@ struct radio {
     volatile float level_dbfs, clip_ppm;
     volatile int eof;
 
-#ifdef HAVE_UHD
-    uhd_usrp_handle usrp;
-    uhd_rx_streamer_handle rx;
-    uhd_rx_metadata_handle md;
-#endif
+    struct sdr* dev; /* open SDR, NULL until the first tuning */
+    struct sdr_info info;
 };
 
 static void radio_deliver(struct radio* r, const float* iq, int n, int nonblock)
@@ -184,34 +182,50 @@ static void* file_thread(void* arg)
     return NULL;
 }
 
-#ifdef HAVE_UHD
-static int uhd_open(struct radio* r)
+/* -u [DRIVER:]ARGS: the SDR driver and its device arguments (UHD without a
+ * driver name, as before). */
+static int radio_select(struct radio* r, const char* spec)
 {
-    if (r->usrp)
-        return 0;
-    if (uhd_usrp_make(&r->usrp, r->uhd_args) || uhd_rx_streamer_make(&r->rx) ||
-        uhd_rx_metadata_make(&r->md)) {
-        fprintf(stderr, "UHD: cannot open \"%s\"\n", r->uhd_args);
-        return -1;
-    }
-    if (r->mcr > 0)
-        uhd_usrp_set_master_clock_rate(r->usrp, r->mcr, 0);
-    uhd_meta_range_handle range;
-    r->gain_max = 60;
-    if (!uhd_meta_range_make(&range)) {
-        if (!uhd_usrp_get_rx_gain_range(r->usrp, "", 0, range))
-            uhd_meta_range_stop(range, &r->gain_max);
-        uhd_meta_range_free(&range);
-    }
-    size_t chan = 0;
-    uhd_stream_args_t sa = {
-        .cpu_format = "fc32",
-        .otw_format = "sc16",
-        .args = "",
-        .channel_list = &chan,
-        .n_channels = 1,
+    static const struct sdr_driver* const drivers[] = {
+#ifdef HAVE_UHD
+        &sdr_uhd,
+#endif
+#ifdef HAVE_BLADERF
+        &sdr_bladerf,
+#endif
+        NULL,
     };
-    return uhd_usrp_get_rx_stream(r->usrp, &sa, r->rx) ? -1 : 0;
+    static const char* const known[] = { "uhd", "bladerf" };
+    const char* colon = strchr(spec, ':');
+    const size_t len = colon ? (size_t)(colon - spec) : 0;
+    const char* want = "uhd";
+    const char* args = spec;
+    for (size_t i = 0; colon && i < sizeof(known) / sizeof(known[0]); i++)
+        if (len == strlen(known[i]) && !strncmp(spec, known[i], len)) {
+            want = known[i];
+            args = colon + 1;
+        }
+    for (int i = 0; drivers[i]; i++)
+        if (!strcmp(drivers[i]->prefix, want)) {
+            r->drv = drivers[i];
+            r->dev_args = args;
+            return 0;
+        }
+    fprintf(stderr, "built without %s support\n", want);
+    return -1;
+}
+
+static int radio_open(struct radio* r)
+{
+    if (r->dev)
+        return 0;
+    if (!r->drv)
+        return -1;
+    r->dev = r->drv->open(r->dev_args, r->mcr, &r->info);
+    if (!r->dev)
+        return -1;
+    r->gain_max = r->info.gain_max;
+    return 0;
 }
 
 /* Input level and automatic gain (-G auto). The level is the mean power
@@ -258,8 +272,7 @@ static void radio_level(struct radio* r, struct level* lv, const float* iq, int 
     r->clip_ppm = (float)(clip * 1e6);
     lv->pow = 0;
     lv->n = lv->clip = 0;
-#ifdef HAVE_UHD
-    if (!r->gain_auto || r->file)
+    if (!r->gain_auto || r->file || !r->dev)
         return;
     if (lv->skip) {
         lv->skip = 0;
@@ -304,27 +317,32 @@ static void radio_level(struct radio* r, struct level* lv, const float* iq, int 
             lv->acc += snr;
             if (++lv->nacc >= OPT_WINDOWS) {
                 const double s = lv->acc / lv->nacc;
-                double next = -1;
+                /* the next gain to try, if any (the gain may go below 0 dB) */
+                const double gmin = r->info.gain_min;
+                double next = 0;
+                int more = 0;
                 fprintf(stderr, "AGC: gain %.0f dB: SNR %.2f dB\n", g, s);
                 if (s > lv->best_snr + OPT_BETTER) {
                     lv->best_snr = s;
                     lv->best_g = g;
                     next = g + lv->dir * OPT_STEP;
+                    more = 1;
                 } else if (lv->dir > 0 && !lv->tried_down) {
                     lv->dir = -1;
                     lv->tried_down = 1;
                     next = lv->best_g - OPT_STEP;
+                    more = 1;
                 }
-                if (next < 0 || next > gmax) {
+                if (!more || next < gmin || next > gmax) {
+                    more = 0;
                     if (lv->dir > 0 && !lv->tried_down) {
                         lv->dir = -1;
                         lv->tried_down = 1;
                         next = lv->best_g - OPT_STEP;
+                        more = next >= gmin && next <= gmax;
                     }
-                    if (next < 0 || next > gmax)
-                        next = -1;
                 }
-                if (next < 0) {
+                if (!more) {
                     g = lv->best_g;
                     lv->opt = 2;
                     lv->unlocked = 0;
@@ -345,16 +363,14 @@ static void radio_level(struct radio* r, struct level* lv, const float* iq, int 
         }
     }
     r->agc_state = lv->opt;
-    g = fmax(0, fmin(gmax, round(g)));
+    g = fmax(r->info.gain_min, fmin(gmax, round(g)));
     if (g != r->gain) {
-        uhd_usrp_set_rx_gain(r->usrp, g, 0, "");
-        uhd_usrp_get_rx_gain(r->usrp, 0, "", &g);
+        g = r->drv->set_gain(r->dev, g);
         fprintf(stderr, "AGC: level %.1f dBFS, clipping %.0f ppm: gain %.0f -> %.0f dB\n", dbfs,
                 clip * 1e6, r->gain, g);
         r->gain = g;
         lv->skip = 1;
     }
-#endif
 }
 
 /* Samples lost in an overflow are replaced by as many zeros (up to this
@@ -373,35 +389,25 @@ static void radio_fill(struct radio* r, double lost)
     }
 }
 
-static void* uhd_thread(void* arg)
+static void* sdr_thread(void* arg)
 {
     struct radio* r = arg;
-    size_t spb;
-    uhd_rx_streamer_max_num_samps(r->rx, &spb);
+    const struct sdr_driver* d = r->drv;
     enum { N = 65536 };
     float* buf = malloc(sizeof(float) * 2 * N);
-    uhd_stream_cmd_t cmd = { .stream_mode = UHD_STREAM_MODE_START_CONTINUOUS,
-                             .stream_now = true };
-    uhd_rx_streamer_issue_stream_cmd(r->rx, &cmd);
+    d->start(r->dev);
     double t_next = -1; /* device time of the next sample expected */
     struct level lv = { 0 };
     while (r->running) {
-        size_t got = 0;
+        int got = 0;
         while (got < N && r->running) {
-            void* p = buf + 2 * got;
-            size_t n = 0;
-            uhd_rx_streamer_recv(r->rx, &p, N - got < spb ? N - got : spb, &r->md, 1.0,
-                                 false, &n);
-            bool has_time = false;
-            uhd_rx_metadata_has_time_spec(r->md, &has_time);
-            if (n > 0 && has_time) {
-                int64_t full;
-                double frac;
-                uhd_rx_metadata_time_spec(r->md, &full, &frac);
-                const double t = (double)full + frac;
+            double t = -1;
+            enum sdr_status st = SDR_OK;
+            const int n = d->read(r->dev, buf + 2 * got, N - got, 1.0, &t, &st);
+            if (n > 0 && t >= 0) {
                 const double lost = t_next < 0 ? 0 : (t - t_next) * r->rate;
                 if (lost >= 1 && lost < MAX_FILL * r->rate) {
-                    radio_deliver(r, buf, (int)got, 1);
+                    radio_deliver(r, buf, got, 1);
                     radio_fill(r, lost);
                     memmove(buf, buf + 2 * got, sizeof(float) * 2 * n);
                     got = 0;
@@ -409,35 +415,33 @@ static void* uhd_thread(void* arg)
                 }
                 t_next = t + n / r->rate;
             }
-            uhd_rx_metadata_error_code_t err;
-            uhd_rx_metadata_error_code(r->md, &err);
-            if (err == UHD_RX_METADATA_ERROR_CODE_OVERFLOW) {
+            if (st == SDR_OVERFLOW) {
                 r->overflows++;
-            } else if (err == UHD_RX_METADATA_ERROR_CODE_TIMEOUT) {
+            } else if (st == SDR_TIMEOUT) {
                 /* After an overflow the B2xx may stop streaming: restart. */
-                fprintf(stderr, "UHD: receive timeout, restarting the stream\n");
-                cmd.stream_mode = UHD_STREAM_MODE_STOP_CONTINUOUS;
-                uhd_rx_streamer_issue_stream_cmd(r->rx, &cmd);
-                cmd.stream_mode = UHD_STREAM_MODE_START_CONTINUOUS;
-                uhd_rx_streamer_issue_stream_cmd(r->rx, &cmd);
-            } else if (err != UHD_RX_METADATA_ERROR_CODE_NONE) {
-                fprintf(stderr, "UHD receive error %d\n", (int)err);
+                fprintf(stderr, "%s: receive timeout, restarting the stream\n", r->info.name);
+                d->stop(r->dev);
+                d->start(r->dev);
             }
             got += n;
         }
         /* Never block the radio: drop samples if the receiver is behind. */
-        radio_level(r, &lv, buf, (int)got);
-        radio_deliver(r, buf, (int)got, 1);
+        radio_level(r, &lv, buf, got);
+        radio_deliver(r, buf, got, 1);
         r->samples += got;
     }
-    cmd.stream_mode = UHD_STREAM_MODE_STOP_CONTINUOUS;
-    uhd_rx_streamer_issue_stream_cmd(r->rx, &cmd);
+    d->stop(r->dev);
     free(buf);
     return NULL;
 }
-#endif
 
-/* Tune the source; returns the sample rate actually obtained (the USRP may
+/* Analog bandwidth within the driver's range. */
+static double radio_bw_clamp(const struct radio* r, double bw)
+{
+    return bw < r->info.bw_min ? r->info.bw_min : bw > r->info.bw_max ? r->info.bw_max : bw;
+}
+
+/* Tune the source; returns the sample rate actually obtained (the SDR may
  * round it, e.g. to its master clock divided by an integer), or -1. */
 static double radio_configure(struct radio* r, double freq, double rate)
 {
@@ -445,94 +449,63 @@ static double radio_configure(struct radio* r, double freq, double rate)
     r->rate = rate;
     if (r->file)
         return rate;
-#ifdef HAVE_UHD
-    if (uhd_open(r))
+    if (radio_open(r)) {
+        if (!r->drv)
+            fprintf(stderr, "no SDR driver\n");
         return -1;
-    uhd_usrp_set_rx_rate(r->usrp, rate, 0);
-    uhd_usrp_set_rx_agc(r->usrp, false, 0); /* the AD9361's own AGC, as UHD sets it up, starves the ADC */
-    uhd_usrp_set_rx_gain(r->usrp, r->gain, 0, "");
-    uhd_usrp_get_rx_gain(r->usrp, 0, "", &r->gain);
-    /* Analog filter: the AD9361 low-pass ahead of its ADC. Narrow, it keeps
-     * the neighbouring channels (often stronger on a cable) out of the ADC
+    }
+    const struct sdr_driver* d = r->drv;
+    const double actual = d->set_rate(r->dev, rate);
+    r->gain = d->set_gain(r->dev, r->gain);
+    /* Analog filter: the low-pass ahead of the ADC. Narrow, it keeps the
+     * neighbouring channels (often stronger on a cable) out of the ADC
      * range; the digital filters only act after it. */
     if (r->bw_opt != 0) {
-        double bw = r->bw_opt > 0 ? r->bw_opt : r->bw_need > 0 ? 1.15 * r->bw_need : rate;
-        bw = bw < 0.2e6 ? 0.2e6 : bw > 56e6 ? 56e6 : bw;
-        uhd_usrp_set_rx_bandwidth(r->usrp, bw, 0);
-        double got = bw;
-        uhd_usrp_get_rx_bandwidth(r->usrp, 0, &got);
-        r->bw_set = got;
+        const double bw = r->bw_opt > 0 ? r->bw_opt : r->bw_need > 0 ? 1.15 * r->bw_need : rate;
+        r->bw_set = d->set_bandwidth(r->dev, radio_bw_clamp(r, bw));
     }
-    if (r->antenna && uhd_usrp_set_rx_antenna(r->usrp, r->antenna, 0))
-        fprintf(stderr, "UHD: cannot select antenna \"%s\"\n", r->antenna);
-    uhd_tune_request_t req = { .target_freq = freq,
-                               .rf_freq_policy = UHD_TUNE_REQUEST_POLICY_AUTO,
-                               .dsp_freq_policy = UHD_TUNE_REQUEST_POLICY_AUTO };
-    uhd_tune_result_t tune;
-    uhd_usrp_set_rx_freq(r->usrp, &req, 0, &tune);
-    double actual = rate;
-    uhd_usrp_get_rx_rate(r->usrp, 0, &actual);
-    fprintf(stderr, "UHD: %.3f MHz, %.6f Msps (asked %.6f), gain %.1f dB, analog bandwidth %.2f MHz\n",
-            tune.actual_rf_freq / 1e6, actual / 1e6, rate / 1e6, r->gain,
-            r->bw_set / 1e6);
+    if (r->antenna && d->set_antenna(r->dev, r->antenna))
+        fprintf(stderr, "%s: cannot select antenna \"%s\"\n", r->info.name, r->antenna);
+    const double rf = d->set_freq(r->dev, freq);
+    fprintf(stderr, "%s: %.3f MHz, %.6f Msps (asked %.6f), gain %.1f dB, analog bandwidth %.2f MHz\n",
+            r->info.name, rf / 1e6, actual / 1e6, rate / 1e6, r->gain, r->bw_set / 1e6);
     r->rate = actual;
     return actual;
-#else
-    fprintf(stderr, "built without UHD support\n");
-    return -1;
-#endif
 }
 
 /* Moves the centre frequency, the sample rate and the stream unchanged. */
 static void radio_retune(struct radio* r, double freq)
 {
     r->freq = freq;
-#ifdef HAVE_UHD
-    if (r->file || !r->usrp)
+    if (r->file || !r->dev)
         return;
-    uhd_tune_request_t req = { .target_freq = freq,
-                               .rf_freq_policy = UHD_TUNE_REQUEST_POLICY_AUTO,
-                               .dsp_freq_policy = UHD_TUNE_REQUEST_POLICY_AUTO };
-    uhd_tune_result_t tune;
-    uhd_usrp_set_rx_freq(r->usrp, &req, 0, &tune);
-    fprintf(stderr, "UHD: retuned to %.3f MHz\n", tune.actual_rf_freq / 1e6);
-#endif
+    const double rf = r->drv->set_freq(r->dev, freq);
+    fprintf(stderr, "%s: retuned to %.3f MHz\n", r->info.name, rf / 1e6);
 }
 
 /* Analog filter for the channels in use: twice the farthest channel edge
  * from the centre (auto mode only; the whole capture when none is open). */
 static void radio_set_span(struct radio* r, double half_span)
 {
-#ifdef HAVE_UHD
-    if (r->file || !r->usrp || r->bw_opt >= 0)
+    if (r->file || !r->dev || r->bw_opt >= 0)
         return;
-    double bw = half_span > 0 ? 2 * 1.15 * half_span : r->rate;
-    bw = bw < 0.2e6 ? 0.2e6 : bw > 56e6 ? 56e6 : bw;
+    const double bw = radio_bw_clamp(r, half_span > 0 ? 2 * 1.15 * half_span : r->rate);
     if (fabs(bw - r->bw_set) < 0.05e6)
         return;
-    uhd_usrp_set_rx_bandwidth(r->usrp, bw, 0);
-    double got = bw;
-    uhd_usrp_get_rx_bandwidth(r->usrp, 0, &got);
-    r->bw_set = got;
-    fprintf(stderr, "UHD: analog bandwidth %.2f MHz\n", got / 1e6);
-#else
-    (void)r;
-    (void)half_span;
-#endif
+    r->bw_set = r->drv->set_bandwidth(r->dev, bw);
+    fprintf(stderr, "%s: analog bandwidth %.2f MHz\n", r->info.name, r->bw_set / 1e6);
 }
 
 /* Start feeding mt (or the sink) from the configured source. */
 static int radio_start(struct radio* r, drx_mt* mt)
 {
+    if (!r->file && !r->dev)
+        return -1;
     r->mt = mt;
     r->samples = r->overflows = r->filled = 0;
     r->eof = 0;
     r->running = 1;
-#ifdef HAVE_UHD
-    pthread_create(&r->thread, NULL, r->file ? file_thread : uhd_thread, r);
-#else
-    pthread_create(&r->thread, NULL, file_thread, r);
-#endif
+    pthread_create(&r->thread, NULL, r->file ? file_thread : sdr_thread, r);
     r->started = 1;
     return 0;
 }
@@ -549,13 +522,10 @@ static void radio_stop(struct radio* r)
 static void radio_close(struct radio* r)
 {
     radio_stop(r);
-#ifdef HAVE_UHD
-    if (r->usrp) {
-        uhd_rx_metadata_free(&r->md);
-        uhd_rx_streamer_free(&r->rx);
-        uhd_usrp_free(&r->usrp);
+    if (r->dev) {
+        r->drv->close(r->dev);
+        r->dev = NULL;
     }
-#endif
 }
 
 /* ---- standalone output ---------------------------------------------------- */
@@ -1337,7 +1307,7 @@ static void status_json(struct sbuf* o)
 {
     const struct radio* r = ctl_b[0].radio;
     const int running = r->started && r->running;
-    sb_printf(o, "{\"ok\": true, \"radio\": {\"source\": \"%s\", ", r->file ? "file" : "uhd");
+    sb_printf(o, "{\"ok\": true, \"radio\": {\"source\": \"%s\", ", r->file ? "file" : r->drv ? r->drv->prefix : "none");
     sb_num(o, "freq", r->freq, 0);
     sb_printf(o, ", ");
     sb_num(o, "rate", r->rate, 0);
@@ -1470,55 +1440,62 @@ static void discard_sink(void* ctx, const float* iq, int n)
     (void)n;
 }
 
-#ifdef HAVE_UHD
-/* n samples at freq/rate on an idle radio (lock held); gain < 0: auto. */
+static int radio_capture_at(struct radio* r, double freq, double rate, double gain, double bw, int n,
+                            float* out, double* level);
+
+/* n samples at freq/rate on an idle radio (lock held); gain < 0: auto.
+ * *gain_used: the gain of the capture; the radio's gain is left as it was
+ * (the next tuning starts from it, not from a capture's). */
 static int radio_capture(struct radio* r, double freq, double rate, double gain, double bw, int n,
-                         float* out, double* level)
+                         float* out, double* level, double* gain_used)
 {
-    const double g0 = r->gain, bwo = r->bw_opt, bwn = r->bw_need;
+    const double bwo = r->bw_opt, bwn = r->bw_need, g0 = r->gain;
+    const int rc = radio_capture_at(r, freq, rate, gain, bw, n, out, level);
+    *gain_used = r->gain;
+    r->gain = g0;
+    r->bw_opt = bwo;
+    r->bw_need = bwn;
+    return rc;
+}
+
+static int radio_capture_at(struct radio* r, double freq, double rate, double gain, double bw, int n,
+                            float* out, double* level)
+{
     const int auto_g = gain < 0;
     r->gain = auto_g ? 30 : gain;
     r->bw_opt = bw > 0 ? bw : -1;
     r->bw_need = 0; /* bw 0: the whole capture */
-    if (radio_configure(r, freq, rate) <= 0) {
-        r->gain = g0;
-        r->bw_opt = bwo;
-        r->bw_need = bwn;
+    const double got_rate = radio_configure(r, freq, rate);
+    if (got_rate <= 0 || r->file)
         return -1;
-    }
-    size_t spb = 0;
-    uhd_rx_streamer_max_num_samps(r->rx, &spb);
+    const struct sdr_driver* d = r->drv;
     for (int pass = 0; pass < (auto_g ? 3 : 1); pass++) {
         const int skip = (int)(0.02 * r->rate) + 4096;
         const int want = pass < (auto_g ? 2 : 0) ? 16384 : n;
-        uhd_stream_cmd_t cmd = { .stream_mode = UHD_STREAM_MODE_START_CONTINUOUS, .stream_now = true };
-        uhd_rx_streamer_issue_stream_cmd(r->rx, &cmd);
+        d->start(r->dev);
         int got = -skip;
         float tmp[2 * 8192];
         double p = 0;
         while (got < want) {
-            size_t k = 0;
-            void* ptr = got < 0 ? (void*)tmp : (void*)(out + 2 * got);
+            double t;
+            enum sdr_status st;
+            float* ptr = got < 0 ? tmp : out + 2 * got;
             /* the samples skipped end exactly where the capture starts */
-            size_t room = got < 0 ? (size_t)(-got < 8192 ? -got : 8192) : (size_t)(want - got);
-            if (room > spb)
-                room = spb;
-            uhd_rx_streamer_recv(r->rx, &ptr, room, &r->md, 1.0, false, &k);
-            if (!k)
+            const int room = got < 0 ? (-got < 8192 ? -got : 8192) : want - got;
+            const int k = d->read(r->dev, ptr, room, 1.0, &t, &st);
+            if (k <= 0 && st != SDR_OVERFLOW)
                 break;
             if (got >= 0)
-                for (size_t i = 0; i < 2 * k; i++)
+                for (int i = 0; i < 2 * k; i++)
                     p += (double)out[2 * got + i] * out[2 * got + i];
-            got += (int)k;
+            got += k;
         }
-        cmd.stream_mode = UHD_STREAM_MODE_STOP_CONTINUOUS;
-        uhd_rx_streamer_issue_stream_cmd(r->rx, &cmd);
+        d->stop(r->dev);
         /* drain what was in flight */
-        for (int d = 0; d < 50; d++) {
-            size_t k = 0;
-            void* ptr = tmp;
-            uhd_rx_streamer_recv(r->rx, &ptr, 8192, &r->md, 0.01, false, &k);
-            if (!k)
+        for (int k = 0; k < 50; k++) {
+            double t;
+            enum sdr_status st;
+            if (d->read(r->dev, tmp, 8192, 0.01, &t, &st) <= 0)
                 break;
         }
         if (got < want)
@@ -1526,19 +1503,12 @@ static int radio_capture(struct radio* r, double freq, double rate, double gain,
         const double dbfs = 10 * log10(p / want + 1e-20);
         *level = dbfs;
         if (pass < (auto_g ? 2 : 0)) {
-            double g = r->gain + fmax(-20, fmin(20, -24 - dbfs));
-            g = fmax(0, fmin(r->gain_max, round(g)));
-            uhd_usrp_set_rx_gain(r->usrp, g, 0, "");
-            uhd_usrp_get_rx_gain(r->usrp, 0, "", &g);
-            r->gain = g;
+            const double g = r->gain + fmax(-20, fmin(20, -24 - dbfs));
+            r->gain = d->set_gain(r->dev, fmax(r->info.gain_min, fmin(r->gain_max, round(g))));
         }
     }
-    r->bw_opt = bwo;
-    r->bw_need = bwn;
-    (void)g0;
     return 0;
 }
-#endif
 
 static void b64(struct sbuf* o, const uint8_t* d, size_t n)
 {
@@ -1652,17 +1622,16 @@ static void ctl_request(const char* req, struct sbuf* o)
         if (json_str(req, "antenna", ant, sizeof(ant)) && ant[0])
             b->radio->antenna = ant;
         if (!strcmp(cmd, "capture")) {
-#ifdef HAVE_UHD
             int n = (int)json_num(req, "samples", 65536);
             n = n < 1024 ? 1024 : n > 1048576 ? 1048576 : n;
             const char* gv = json_val(req, "gain");
             const double gain = gv && *gv == '"' ? -1 : json_num(req, "gain", -1);
             float* iq = malloc(sizeof(float) * 2 * n);
-            double level = NAN;
+            double level = NAN, g = NAN;
             const int rc = iq ? radio_capture(b->radio, json_num(req, "freq", 0), json_num(req, "rate", 20e6), gain,
-                                              json_num(req, "bandwidth", 0), n, iq, &level)
+                                              json_num(req, "bandwidth", 0), n, iq, &level, &g)
                               : -1;
-            const double f = b->radio->freq, rate = b->radio->rate, g = b->radio->gain;
+            const double f = b->radio->freq, rate = b->radio->rate;
             b->radio->antenna = ant0;
             pthread_mutex_unlock(&ctl_lock);
             if (rc) {
@@ -1674,10 +1643,6 @@ static void ctl_request(const char* req, struct sbuf* o)
                 sb_printf(o, "\"}");
             }
             free(iq);
-#else
-            pthread_mutex_unlock(&ctl_lock);
-            sb_printf(o, "{\"ok\": false, \"error\": \"built without UHD\"}");
-#endif
             return;
         }
         struct dvbrx_tune t;
@@ -2233,17 +2198,17 @@ static int run_multi(struct radio* radio, char** specs, int n, double centre, do
 static void usage(const char* prog)
 {
     fprintf(stderr,
-            "usage: %s (-u UHD_ARGS -f FREQ | -F FILE) -s SYMRATE [-S RATE] [-G GAIN] [-A ANT] "
+            "usage: %s (-u [DRIVER:]ARGS -f FREQ | -F FILE) -s SYMRATE [-S RATE] [-G GAIN] [-A ANT] "
             "[-M MCR] [-r ROLLOFF] [-D SYMBOLS] [-g GOLD] [-i ISI] [-l DVBS_RATE] [-c QAM] [-T MHZ] [-2 MHZ] [-o DEST] "
             "[-t THREADS] [-R]\n"
-            "       %s -d N (-u UHD_ARGS | -F FILE) [-S MAX_RATE] [-G GAIN] [-A ANT] [-M MCR] "
+            "       %s -d N (-u [DRIVER:]ARGS | -F FILE) [-S MAX_RATE] [-G GAIN] [-A ANT] [-M MCR] "
             "[-L LNB] [-t THREADS]\n",
             prog, prog);
 }
 
 int main(int argc, char** argv)
 {
-    const char *dest = "-", *lnb_spec = "none";
+    const char *dest = "-", *lnb_spec = "none", *dev_spec = NULL;
     struct radio radio = { .gain = 40, .bw_opt = -1 };
     double freq = 0, rate = 0, symrate = 0;
     float rolloff = 0.2f;
@@ -2259,7 +2224,7 @@ int main(int argc, char** argv)
     int opt;
     while ((opt = getopt(argc, argv, "u:F:f:S:G:A:B:C:P:M:s:r:D:g:i:o:t:Rd:L:l:c:T:2:n:W:x:m:")) != -1) {
         switch (opt) {
-        case 'u': radio.uhd_args = optarg; break;
+        case 'u': dev_spec = optarg; break;
         case 'F': radio.file = optarg; break;
         case 'f': freq = atof(optarg); break;
         case 'S': rate = atof(optarg); break;
@@ -2312,10 +2277,12 @@ int main(int argc, char** argv)
         default: usage(argv[0]); return 2;
         }
     }
-    if (!radio.uhd_args && !radio.file) {
+    if (!dev_spec && !radio.file) {
         usage(argv[0]);
         return 2;
     }
+    if (dev_spec && !radio.file && radio_select(&radio, dev_spec))
+        return 2;
     if (gold < 0) {
         fprintf(stderr, "invalid PLS code\n");
         return 2;

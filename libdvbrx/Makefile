@@ -8,9 +8,11 @@ OBJ := $(SRC:src/%.c=build/%.o)
 
 TESTS := $(patsubst ../tests/%.c,build/%,$(wildcard ../tests/test_*.c))
 
-# dvbrx talks to USRPs through the UHD C API when it is installed.
-UHD_FLAGS := $(if $(wildcard /usr/include/uhd.h),-DHAVE_UHD,)
-UHD_LIBS := $(if $(wildcard /usr/include/uhd.h),-luhd,)
+# dvbrx's SDR drivers, each built when its library is installed: UHD
+# (USRP B2xx, through the UHD C API), libbladeRF (bladeRF).
+SDR_FLAGS := $(if $(wildcard /usr/include/uhd.h),-DHAVE_UHD,) $(if $(wildcard /usr/include/libbladeRF.h),-DHAVE_BLADERF,)
+SDR_LIBS := $(if $(wildcard /usr/include/uhd.h),-luhd,) $(if $(wildcard /usr/include/libbladeRF.h),-lbladeRF,)
+SDR_SRC := $(if $(wildcard /usr/include/uhd.h),tools/sdr_uhd.c,) $(if $(wildcard /usr/include/libbladeRF.h),tools/sdr_bladerf.c,)
 
 all: build/libdvbrx.so build/libdvbrx.a build/fe_bench build/dvbrx_file build/dvbrx $(TESTS)
 
@@ -29,8 +31,8 @@ build/fe_bench: tools/fe_bench.c build/libdvbrx.a
 build/dvbrx_file: tools/dvbrx_file.c build/libdvbrx.a
 	$(CC) $(CPPFLAGS) $(CFLAGS) $< build/libdvbrx.a -o $@ $(LDLIBS)
 
-build/dvbrx: tools/dvbrx.c tools/psi.c tools/psi.h build/libdvbrx.a ../kernel/dvbrx_ioctl.h
-	$(CC) $(CPPFLAGS) -I../kernel $(CFLAGS) $(UHD_FLAGS) tools/dvbrx.c tools/psi.c build/libdvbrx.a -o $@ $(LDLIBS) $(UHD_LIBS)
+build/dvbrx: tools/dvbrx.c tools/psi.c tools/psi.h tools/sdr.h $(SDR_SRC) build/libdvbrx.a ../kernel/dvbrx_ioctl.h
+	$(CC) $(CPPFLAGS) -I../kernel $(CFLAGS) $(SDR_FLAGS) tools/dvbrx.c tools/psi.c $(SDR_SRC) build/libdvbrx.a -o $@ $(LDLIBS) $(SDR_LIBS)
 
 build/test_%: ../tests/test_%.c build/libdvbrx.a
 	$(CC) $(CPPFLAGS) $(CFLAGS) $< build/libdvbrx.a -o $@ $(LDLIBS)
