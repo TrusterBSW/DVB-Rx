@@ -9,10 +9,11 @@ OBJ := $(SRC:src/%.c=build/%.o)
 TESTS := $(patsubst ../tests/%.c,build/%,$(wildcard ../tests/test_*.c))
 
 # dvbrx's SDR drivers, each built when its library is installed: UHD
-# (USRP B2xx, through the UHD C API), libbladeRF (bladeRF).
-SDR_FLAGS := $(if $(wildcard /usr/include/uhd.h),-DHAVE_UHD,) $(if $(wildcard /usr/include/libbladeRF.h),-DHAVE_BLADERF,)
-SDR_LIBS := $(if $(wildcard /usr/include/uhd.h),-luhd,) $(if $(wildcard /usr/include/libbladeRF.h),-lbladeRF,)
-SDR_SRC := $(if $(wildcard /usr/include/uhd.h),tools/sdr_uhd.c,) $(if $(wildcard /usr/include/libbladeRF.h),tools/sdr_bladerf.c,)
+# (USRP B2xx, through the UHD C API), libbladeRF (bladeRF), libhackrf (HackRF).
+HACKRF_H := $(wildcard /usr/include/libhackrf/hackrf.h)
+SDR_FLAGS := $(if $(wildcard /usr/include/uhd.h),-DHAVE_UHD,) $(if $(wildcard /usr/include/libbladeRF.h),-DHAVE_BLADERF,) $(if $(HACKRF_H),-DHAVE_HACKRF,)
+SDR_LIBS := $(if $(wildcard /usr/include/uhd.h),-luhd,) $(if $(wildcard /usr/include/libbladeRF.h),-lbladeRF,) $(if $(HACKRF_H),-lhackrf,)
+SDR_SRC := $(if $(wildcard /usr/include/uhd.h),tools/sdr_uhd.c,) $(if $(wildcard /usr/include/libbladeRF.h),tools/sdr_bladerf.c,) $(if $(HACKRF_H),tools/sdr_hackrf.c,)
 
 all: build/libdvbrx.so build/libdvbrx.a build/fe_bench build/dvbrx_file build/dvbrx $(TESTS)
 

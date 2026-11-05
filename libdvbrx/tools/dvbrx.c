@@ -12,8 +12,9 @@
  *
  * Options:
  *   -u ARGS     SDR: "[DRIVER:]ARGS", DRIVER "uhd" (default; ARGS e.g.
- *               "type=b200") or "bladerf" (ARGS: libbladeRF device string,
- *               "" for the first one)
+ *               "type=b200"), "bladerf" (ARGS: libbladeRF device string,
+ *               "" for the first one) or "hackrf" (ARGS: serial number, ""
+ *               for the first one; 20 Msps at most, one channel)
  *   -F FILE     fc32 IQ file (bridge mode: looped in real time, frequency
  *               ignored)
  *   -f HZ       centre frequency (standalone)
@@ -30,7 +31,8 @@
  *               bandwidth of the channel + 15 %, or the whole capture for
  *               several channels; 0: UHD's choice)
  *   -A ANT      receive antenna: UHD "TX/RX" or "RX2" (default: UHD's),
- *               bladeRF "RX1" (default) or "RX2"
+ *               bladeRF "RX1" (default) or "RX2"; HackRF: one input (its
+ *               port power is always off)
  *   -C PATH     bridge mode: control socket for dvbrx-web (default
  *               /run/dvbrx/dvbrx-N.sock, "" for none), see doc/dvbrx-web-api.md
  *   -P DB       input power estimate: dBm at 0 dBFS and 0 dB gain (default 0)
@@ -195,9 +197,12 @@ static int radio_select(struct radio* r, const char* spec)
 #ifdef HAVE_BLADERF
         &sdr_bladerf,
 #endif
+#ifdef HAVE_HACKRF
+        &sdr_hackrf,
+#endif
         NULL,
     };
-    static const char* const known[] = { "uhd", "bladerf" };
+    static const char* const known[] = { "uhd", "bladerf", "hackrf" };
     const char* colon = strchr(spec, ':');
     const size_t len = colon ? (size_t)(colon - spec) : 0;
     const char* want = "uhd";
@@ -1310,6 +1315,8 @@ static void status_json(struct sbuf* o)
     const struct radio* r = ctl_b[0].radio;
     const int running = r->started && r->running;
     sb_printf(o, "{\"ok\": true, \"radio\": {\"source\": \"%s\", ", r->file ? "file" : r->drv ? r->drv->prefix : "none");
+    sb_printf(o, "\"rate_max\": %.0f, \"multi\": %s, ", r->file ? 61.44e6 : r->dev ? r->info.rate_max : r->drv ? r->drv->rate_max : 0,
+              r->file || (r->drv && r->drv->multi) ? "true" : "false");
     sb_num(o, "freq", r->freq, 0);
     sb_printf(o, ", ");
     sb_num(o, "rate", r->rate, 0);
@@ -2303,6 +2310,10 @@ int main(int argc, char** argv)
         radio.file_loop = radio.file_realtime = 1;
         if (lnb_open(&lnb, lnb_spec))
             return 1;
+        if ((nbridges > 1 || wide_rate > 0) && radio.drv && !radio.drv->multi) {
+            fprintf(stderr, "several adapters on one capture (-n, -W): not with this SDR\n");
+            return 2;
+        }
         if (nbridges > 1 || wide_rate > 0) {
             /* one capture for all the adapters, at a fixed rate; the centre
              * follows the channels in use, or stays at -f */
@@ -2323,7 +2334,8 @@ int main(int argc, char** argv)
         for (int i = 0; i < nbridges; i++) {
             b[i] = (struct bridge){ .index = bridge + i, .radio = &radio, .lnb = &lnb,
                                     .hub = hub.n ? &hub : NULL, .threads = threads,
-                                    .rrc_delay = rrc_delay, .max_rate = rate > 0 ? rate : 56e6,
+                                    .rrc_delay = rrc_delay,
+                                    .max_rate = rate > 0 ? rate : radio.drv ? radio.drv->rate_max : 56e6,
                                     .ch_id = -1 };
             hub.b[i] = &b[i];
         }
@@ -2334,6 +2346,10 @@ int main(int argc, char** argv)
     }
 
     if (nmulti) {
+        if (radio.drv && !radio.drv->multi) {
+            fprintf(stderr, "-m: several channels on one capture are not supported with this SDR\n");
+            return 2;
+        }
         radio.file_loop = radio.file_realtime = realtime;
         return run_multi(&radio, multi, nmulti, freq, rate, threads, rrc_delay);
     }

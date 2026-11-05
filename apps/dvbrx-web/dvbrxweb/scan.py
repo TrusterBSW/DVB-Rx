@@ -178,10 +178,24 @@ class Scanner:
         g = float(g) if isinstance(g, (int, float)) else 0.0
         return -g + self._offset()
 
+    def _rate_max(self):
+        """Débit maximal de la radio de dvbrx (20 MS/s pour un HackRF), sinon celui de la config."""
+        try:
+            r = (self.client.status().get("radio") or {}).get("rate_max")
+            if isinstance(r, (int, float)) and r > 0:
+                return min(self.cfg.scan_rate, float(r))
+        except DvbrxError:
+            pass
+        return self.cfg.scan_rate
+
+    def _useful(self):
+        return min(self.cfg.scan_useful, self._rate_max() * 0.95)
+
     def _sweep(self, job, start, stop, antenna, p0, p1, label):
-        """Spectre assemblé de start à stop (Hz) par fenêtres de cfg.scan_useful."""
+        """Spectre assemblé de start à stop (Hz) par fenêtres de la bande utile."""
         cfg = self.cfg
-        rate, useful = cfg.scan_rate, min(cfg.scan_useful, cfg.scan_rate * 0.95)
+        rate = self._rate_max()
+        useful = min(cfg.scan_useful, rate * 0.95)
         centers = np.arange(start + useful / 2, stop + useful / 2 - 1, useful)
         fs_all, ps_all = [], []
         for i, fc in enumerate(centers):
@@ -248,8 +262,9 @@ class Scanner:
         cstop = float(prm.get("cable_stop") or cfg.cable_stop)
         if cstop <= cstart + 8e6:
             raise DvbrxError("plage câble invalide")
-        nwin_c = int(np.ceil((cstop - cstart) / cfg.scan_useful))
-        nwin_s = int(np.ceil((cfg.sat_if_stop - cfg.sat_if_start) / cfg.scan_useful))
+        useful = self._useful()
+        nwin_c = int(np.ceil((cstop - cstart) / useful))
+        nwin_s = int(np.ceil((cfg.sat_if_stop - cfg.sat_if_start) / useful))
         total = nwin_c + (4 * nwin_s if sat else 0)
         result = {"mode": "quick", "time": time.time(), "sat": sat, "lines": [],
                   "cable_range": [cstart, cstop]}
@@ -522,7 +537,7 @@ class Scanner:
         if ch.get("source") == "nit":
             return self._probe_known(job, ln, ch, ant)
         est = ch.get("symbol_rate_est") or ch["width"]
-        fs = float(min(cfg.scan_rate, max(4e6, 2.5 * est)))
+        fs = float(min(self._rate_max(), max(4e6, 2.5 * est)))
         rep = self.client.capture(ch["freq"], fs, 262144, gain="auto", bandwidth=0,
                                   antenna=ant, force=job.params.get("force", False))
         cyc = dsp.cyclic_line(rep["iq"], float(rep.get("rate", fs)), est * 1.45,

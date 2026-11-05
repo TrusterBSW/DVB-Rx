@@ -104,15 +104,21 @@ T, T2, C et le frontal.
     charge depuis sa flash.
   - Puis réception autonome, service `dvbrxd` (`-u bladerf: -A RX1`), dvbrx-web, AGC et
     multicanal.
-- **HackRF** (libhackrf), si on le fait :
-  - 20 MS/s au maximum, ADC 8 bits (environ 45 dB de dynamique) ;
-  - pas d'horodatage (pertes non comblées) ;
-  - lecture par rappel (une file vers le fil radio) ;
-  - raie de continu à éviter (accord décalé et recentrage numérique) ;
-  - gain LNA, VGA et ampli à combiner pour l'AGC ;
-  - alimentation d'antenne à verrouiller à l'arrêt ;
-  - sans multicanal ; dvbrx-web doit connaître le débit maximal de la radio.
-  - Charge : environ 1 à 1,5 jour.
+- **HackRF** (libhackrf, 5/11) : pilote `sdr_hackrf.c`, avec `-u hackrf:` ou `-u hackrf:NUMÉRO_DE_SÉRIE`.
+  - **Débit** : 2 à 20 MS/s. Un seul canal : `-n`, `-W` et `-m` sont refusés.
+  - **Lecture** : file circulaire de 0,4 s depuis le fil de libhackrf ; un débordement est
+    signalé.
+  - **Pertes** : pas d'horodatage, elles ne sont pas comblées. Les débordements internes de la
+    carte (compteur du M0) sont comptés.
+  - **Composante continue** : coupe-continu d'environ 300 Hz.
+  - **Gain** : de 0 à 116 dB (ampli 14 au-delà de 102 dB, LNA par 8, VGA par 2) ; meilleure
+    combinaison à 1 dB près.
+  - **Filtre analogique** : la valeur de la table du MAX2837 immédiatement supérieure.
+  - **Antenne** : alimentation coupée à l'ouverture et à chaque démarrage.
+  - **dvbrx-web** : le statut annonce `rate_max` et `multi`, et le scan rapide fait des
+    fenêtres de 19 MHz.
+  - **Testé** avec une fausse libhackrf (file, repliement, coupe-continu, débordement, délai,
+    gains). **Reste à tester sur la carte.**
 
 ## Autres
 

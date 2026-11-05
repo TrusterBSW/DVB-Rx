@@ -24,7 +24,8 @@ Requête : `{"cmd": "status"}`
 
 ```json
 {"ok": true,
- "radio": {"source": "uhd", "freq": 586000000, "rate": 10240000, "bandwidth": 9020000,
+ "radio": {"source": "uhd", "rate_max": 56000000, "multi": true,
+           "freq": 586000000, "rate": 10240000, "bandwidth": 9020000,
            "gain": 50, "agc": "level|search|best|manual", "level_dbfs": -24.1,
            "input_dbm": -74.1, "overflows": 0, "filled": 0,
            "lnb": {"present": false, "volt": "off", "tone": false}},
@@ -42,6 +43,9 @@ Requête : `{"cmd": "status"}`
 - **`input_dbm`** : estimation de la puissance d'entrée avant l'amplification, calculée comme
   `level_dbfs − gain + offset`. L’offset vaut 0 dB par défaut et se règle avec `-P DB` ; ce n'est pas une mesure calibrée.
 - **`ts_mbps`** : débit TS utile, calculé sur les dernières secondes.
+- **`source`** : `uhd`, `bladerf`, `hackrf` ou `file`. **`rate_max`** : débit d'échantillonnage
+  maximal de la radio (20 MS/s pour un HackRF) ; le scan en tient compte. **`multi`** : faux
+  quand la radio ne sait servir qu'un canal (HackRF).
 - **Champs non pertinents** pour la norme : à `null`.
 
 ## constellation

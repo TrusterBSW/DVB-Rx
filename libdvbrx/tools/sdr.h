@@ -24,7 +24,9 @@ struct sdr_info {
 struct sdr;
 
 struct sdr_driver {
-    const char* prefix; /* "-u PREFIX:ARGS" selects the driver ("uhd", "bladerf") */
+    const char* prefix; /* "-u PREFIX:ARGS" selects the driver ("uhd", "bladerf", "hackrf") */
+    double rate_max;    /* sample rate, before the device is open */
+    int multi;          /* one capture may serve several channels (hub, -m) */
     /* mcr: master clock rate (UHD), 0 for the driver's choice */
     struct sdr* (*open)(const char* args, double mcr, struct sdr_info* info);
     double (*set_rate)(struct sdr* s, double rate);    /* rate obtained */
@@ -45,6 +47,9 @@ extern const struct sdr_driver sdr_uhd;
 #endif
 #ifdef HAVE_BLADERF
 extern const struct sdr_driver sdr_bladerf;
+#endif
+#ifdef HAVE_HACKRF
+extern const struct sdr_driver sdr_hackrf;
 #endif
 
 #endif
