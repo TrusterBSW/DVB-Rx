@@ -88,6 +88,23 @@ T, T2, C et le frontal.
 
 ## Matériel radio
 
+- **Comparatif du 2026-11-05 sur le câble SFR** (coupleur 1/3, détail et scripts dans
+  `~/dvbrx/work/cmp/` sur l'hôte) :
+  - **bladeRF 2.0 micro xA4** : au niveau du B210 (+1 à 2 dB sur le DVB-C et le DOCSIS
+    forts, -1,5 dB en DVB-T), T2 586 MHz à 25,2 dB sans perte depuis 9f6f8f1. FPGA 0.15.3
+    écrite en flash (la 0.16.0 d'origine, inconnue de libbladeRF 2024.05, ne livrait qu'un
+    quart des échantillons) ; à vérifier au prochain débranchement.
+  - **HackRF One** : 6 à 7 dB moins sensible que le B210 (gain par l'avant, vérifié par
+    balayage de la répartition) ; ne décode que les canaux les plus forts. Il travaille
+    mieux près de la pleine échelle (8 bits : -2 dB à -22 dBFS contre -14 dBFS).
+  - **AD9361 (B210, bladeRF), bande basse 138-250 MHz** : le mélangeur répond aussi à
+    3 x la fréquence accordée et y replie le DOCSIS et la TV (414-750 MHz, plus forts) ;
+    seuls les canaux dont le triple tombe dans un vide passent (242, 258, 266). Il faut un
+    filtre passe-bas (~300 MHz) devant pour cette bande ; le HackRF n'a pas ce défaut.
+- **DVB-T : accrochage parfois bloqué** dans le service (562, 594, 578 MHz, B210 comme
+  bladeRF) : le démodulateur ne s'accroche pas de tout l'accord (l'AGC attend un SNR qui ne
+  vient pas), alors que 8 accords de suite passent en 1 s. Rare, non reproduit à la demande.
+
 - **Fait** (2026-11-05) : interface de pilote SDR (`libdvbrx/tools/sdr.h`), avec UHD
   (`sdr_uhd.c`) et bladeRF par libbladeRF (`sdr_bladerf.c`).
   - `-u [PILOTE:]ARGS` : `uhd:type=b200` (ou sans préfixe, comme avant), `bladerf:` (premier
