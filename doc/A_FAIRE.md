@@ -50,17 +50,24 @@ T, T2, C et le frontal.
 - Le DVB-C gère maintenant l'inversion spectrale (auto) et prend la
   modulation demandée comme un indice (fréquent sur les listes anciennes).
 
-- **DVB-T 578 MHz (câble SFR), pertes à 24-25 dB de SNR** (2026-11-05) : bouffées de bruit
-  large bande d'environ 1 ms (1 à 3 symboles OFDM), à environ -20 dBc et uniformes sur tout le
-  canal, aussi présentes dans les bords du canal de 8 MHz. Un symbole touché tombe à environ
-  18 dB de MER, sous le seuil du 64QAM 5/6. Le démodulateur suit bien (pilotes, phase,
-  horloge, fenêtre) et l'enveloppe ne bouge pas (pas de saturation). Une bande vide
-  (710-730 MHz) n'a pas de bouffées : ce n'est pas le bruit propre du B210. Source probable en
-  amont, sur le câble (modem câble en voie montante sur le même coaxial ? tête de réseau ?).
-  Fait : lissage de l'estimation de canal (MER +1,1 dB, pertes divisées par 1,8 sur la capture
-  de 20 s). Reste : identifier la source (couper la box SFR, filtre passe-haut 5-85 MHz devant
-  le B210). Trace : `DRX_T_DEBUG=1` (par symbole, et erreur par seizième de bande quand le
-  MER chute).
+- **DVB-T sur le bloc TNT du câble SFR (538-594 MHz), pertes à 24-25 dB de SNR**
+  (2026-11-05) : des bouffées de bruit large bande arrivent avec le bloc TNT.
+  - **Forme** : durée de l'ordre de 1 ms, environ -20 dBc dans le canal, uniformes en fréquence
+    et dans la durée du symbole, sans composante de phase cohérente. Un symbole touché tombe à
+    environ 18 dB de MER, sous le seuil du 64QAM 5/6.
+  - **Établi** : un récepteur DVB-T indépendant (Python, sans code de dvbrx) voit les mêmes
+    symboles dégradés. Elles sont présentes en même temps dans les intervalles entre canaux TNT
+    (566, 574, 590 MHz), absentes entre canaux DVB-C (606 MHz) et dans une bande vide
+    (710-730 MHz). Elles arrivent par le coaxial (presque rien sur l'entrée RX2 non câblée) et
+    ne dépendent pas de la charge de l'hôte.
+  - **Explication probable** : la TNT est reprise par antenne en tête de réseau et transposée
+    en bloc, avec le bruit impulsif capté par l'antenne. Aucun récepteur ne peut l'éliminer ;
+    seul l'écart au seuil compte.
+  - **Fait** : lissage de l'estimation de canal (MER +1,1 dB, pertes divisées par 1,8 sur une
+    capture de 20 s).
+  - **Reste possible** : un préampli faible bruit (au mieux environ +1 dB sur les symboles
+    touchés). Le DVB-T2 (586 MHz), avec entrelacement temporel et LDPC, y résiste.
+  - **Trace** : `DRX_T_DEBUG=1` (par symbole, et erreur par seizième de bande quand le MER chute).
 
 ## Matériel radio
 
