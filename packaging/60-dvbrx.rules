@@ -1,2 +1,7 @@
 # dvbrx control devices, for dvbrx running as the unprivileged user dvbrxd
 KERNEL=="dvbrx[0-9]*", SUBSYSTEM=="misc", GROUP="video", MODE="0660"
+# bladeRF 2.0 micro (and its bootloader) for the dvbrxd service: libbladeRF's
+# own rule only gives it to the logged-in user (uaccess). The HackRF's rule
+# (libhackrf) already gives it to plugdev.
+SUBSYSTEM=="usb", ATTR{idVendor}=="2cf0", ATTR{idProduct}=="5250", MODE="0660", GROUP="plugdev"
+SUBSYSTEM=="usb", ATTR{idVendor}=="2cf0", ATTR{idProduct}=="5246", MODE="0660", GROUP="plugdev"

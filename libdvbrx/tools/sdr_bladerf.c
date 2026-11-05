@@ -1,8 +1,14 @@
 /* bladeRF (libbladeRF): bladeRF 2.0 micro (AD9361) and bladeRF x40/x115.
  *
- * Sync interface with metadata: SC16 Q11 samples (full scale 2048) with the
- * timestamp of the first one, counted at the sample rate, and an overrun
- * flag; dvbrx fills the gaps from the timestamps as with UHD.
+ * Sync interface, SC16 Q11 samples (full scale 2048). With metadata (the
+ * timestamp of the first sample, an overrun flag) dvbrx fills the gaps as
+ * with UHD. But a bladeRF 2.0 micro xA4 shipped with FPGA 0.16.0, newer than
+ * libbladeRF 2024.05 knows, streamed only a quarter of the samples, the
+ * metadata reads coming one 508-sample message at a time, each flagged as an
+ * overrun (FPGA 0.15.3 streams them all): with an FPGA newer than 0.15 the
+ * plain format is used, without timestamps. DRX_BLADERF_META=0/1 forces it.
+ * The gain set while the input is off is only applied when it is enabled
+ * (and reads back wrong until then): it is set again at the start.
  * Antennas: "RX1" (default) or "RX2", the board's two inputs. */
 #include "sdr.h"
 
@@ -18,6 +24,8 @@ struct sdr {
     bladerf_channel ch;
     int streaming;
     double rate, gain, bw; /* last set, to carry over to the other input */
+    double gain_asked;     /* applied again when the input is enabled */
+    int meta;              /* metadata stream (timestamps) */
     int16_t* buf;          /* SC16 Q11 */
     int nbuf;
 };
@@ -62,9 +70,11 @@ static double brf_set_rate(struct sdr* s, double rate)
 
 static double brf_set_gain(struct sdr* s, double gain)
 {
+    s->gain_asked = gain;
     brf_check(bladerf_set_gain(s->dev, s->ch, (bladerf_gain)lround(gain)), "gain");
     bladerf_gain got = (bladerf_gain)lround(gain);
-    bladerf_get_gain(s->dev, s->ch, &got);
+    if (s->streaming) /* off, the board reads back its default */
+        bladerf_get_gain(s->dev, s->ch, &got);
     s->gain = got;
     return got;
 }
@@ -92,8 +102,14 @@ static struct sdr* brf_open(const char* args, double mcr, struct sdr_info* info)
         return NULL;
     }
     brf_check(bladerf_set_gain_mode(s->dev, s->ch, BLADERF_GAIN_MGC), "manual gain");
+    struct bladerf_version fv = { 0 };
+    bladerf_fpga_version(s->dev, &fv);
+    s->meta = fv.major == 0 && fv.minor <= 15;
+    const char* e = getenv("DRX_BLADERF_META");
+    if (e && *e)
+        s->meta = *e != '0';
     *info = (struct sdr_info){ .name = "bladeRF", .gain_min = 0, .gain_max = 60, .rate_max = 61.44e6,
-                               .bw_min = 0.2e6, .bw_max = 56e6, .timestamps = 1 };
+                               .bw_min = 0.2e6, .bw_max = 56e6, .timestamps = s->meta };
     const struct bladerf_range* r;
     if (!bladerf_get_gain_range(s->dev, s->ch, &r)) {
         info->gain_min = r->min * r->scale;
@@ -105,9 +121,10 @@ static struct sdr* brf_open(const char* args, double mcr, struct sdr_info* info)
         info->bw_min = r->min * r->scale;
         info->bw_max = r->max * r->scale;
     }
-    fprintf(stderr, "bladeRF: %s, gain %.0f..%.0f dB, up to %.2f Msps, filter %.2f..%.2f MHz\n",
-            bladerf_get_board_name(s->dev), info->gain_min, info->gain_max, info->rate_max / 1e6,
-            info->bw_min / 1e6, info->bw_max / 1e6);
+    fprintf(stderr, "bladeRF: %s, FPGA %u.%u.%u, gain %.0f..%.0f dB, up to %.2f Msps, filter %.2f..%.2f MHz, %s\n",
+            bladerf_get_board_name(s->dev), fv.major, fv.minor, fv.patch, info->gain_min, info->gain_max,
+            info->rate_max / 1e6, info->bw_min / 1e6, info->bw_max / 1e6,
+            s->meta ? "timestamps" : "no timestamps");
     return s;
 }
 
@@ -148,12 +165,22 @@ static int brf_start(struct sdr* s)
 {
     if (s->streaming)
         return 0;
-    if (brf_check(bladerf_sync_config(s->dev, BLADERF_RX_X1, BLADERF_FORMAT_SC16_Q11_META, NUM_BUFFERS,
-                                      BUF_SAMPLES, NUM_TRANSFERS, STREAM_TIMEOUT_MS),
+    if (brf_check(bladerf_sync_config(s->dev, BLADERF_RX_X1, s->meta ? BLADERF_FORMAT_SC16_Q11_META : BLADERF_FORMAT_SC16_Q11,
+                                      NUM_BUFFERS, BUF_SAMPLES, NUM_TRANSFERS, STREAM_TIMEOUT_MS),
                   "stream setup") ||
         brf_check(bladerf_enable_module(s->dev, s->ch, true), "start"))
         return -1;
     s->streaming = 1;
+    brf_set_gain(s, s->gain_asked);
+    if (s->bw > 0) /* set while the input was off: again, to be sure */
+        brf_set_bandwidth(s, s->bw);
+    if (getenv("DRX_BLADERF_DEBUG")) {
+        bladerf_bandwidth bw = 0;
+        bladerf_sample_rate sr = 0;
+        bladerf_get_bandwidth(s->dev, s->ch, &bw);
+        bladerf_get_sample_rate(s->dev, s->ch, &sr);
+        fprintf(stderr, "bladeRF: started, filter %.2f MHz, %.6f Msps\n", bw / 1e6, sr / 1e6);
+    }
     return 0;
 }
 
@@ -184,7 +211,7 @@ static int brf_read(struct sdr* s, float* iq, int n, double timeout, double* t, 
     struct bladerf_metadata md;
     memset(&md, 0, sizeof(md));
     md.flags = BLADERF_META_FLAG_RX_NOW;
-    const int rc = bladerf_sync_rx(s->dev, s->buf, (unsigned)n, &md, (unsigned)lround(timeout * 1000));
+    const int rc = bladerf_sync_rx(s->dev, s->buf, (unsigned)n, s->meta ? &md : NULL, (unsigned)lround(timeout * 1000));
     if (rc == BLADERF_ERR_TIMEOUT) {
         *st = SDR_TIMEOUT;
         return 0;
@@ -194,12 +221,12 @@ static int brf_read(struct sdr* s, float* iq, int n, double timeout, double* t, 
         *st = SDR_ERROR;
         return 0;
     }
-    const int got = (int)md.actual_count < n ? (int)md.actual_count : n;
+    const int got = !s->meta ? n : (int)md.actual_count < n ? (int)md.actual_count : n;
     for (int i = 0; i < 2 * got; i++)
         iq[i] = s->buf[i] * (1.0f / 2048);
-    if (s->rate > 0)
+    if (s->meta && s->rate > 0)
         *t = (double)md.timestamp / s->rate;
-    *st = md.status & BLADERF_META_STATUS_OVERRUN ? SDR_OVERFLOW : SDR_OK;
+    *st = s->meta && (md.status & BLADERF_META_STATUS_OVERRUN) ? SDR_OVERFLOW : SDR_OK;
     return got;
 }
 
