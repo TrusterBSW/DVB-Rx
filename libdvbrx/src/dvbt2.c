@@ -1047,36 +1047,45 @@ static int decode_p1(drx_dvbt2* d, int s)
 }
 
 /* Guard interval by cyclic prefix correlation over the first symbols after
- * the P1 at s. */
+ * the P1 at s. The copy is also looked for one or two samples off the FFT
+ * size: the sample clock is only corrected once a guard is found, and an
+ * offset of 23 ppm (a transmitter's, on the SFR cable) moves it by 0.75
+ * sample at 32K, which took the correlation down to a quarter of its peak
+ * with a bladeRF (under the threshold for good) and to a half with a B210. */
 static int detect_guard(drx_dvbt2* d, int s)
 {
     const int n = d->n;
     float best = 0;
-    int bg = -1;
+    int bg = -1, bk = 0;
     cf bc = 0;
     for (int gi = 0; gi < 7; gi++) {
         const int g = n * GI_NUM[gi] / GI_DEN[gi];
-        if (s + P1_LEN + 4 * (n + g) + n > d->nbuf)
+        if (s + P1_LEN + 4 * (n + g) + n + 2 > d->nbuf)
             return -2;
-        float sc = 0;
-        cf call = 0;
-        for (int l = 0; l < 4; l++) {
-            const cf* x = d->buf + s + P1_LEN + l * (n + g);
-            cf c = 0;
-            float e = 0;
-            for (int t = 0; t < g; t++) {
-                c += x[t] * conjf(x[t + n]);
-                e += 0.5f * (crealf(x[t] * conjf(x[t])) + crealf(x[t + n] * conjf(x[t + n])));
+        for (int k = -2; k <= 2; k++) {
+            float sc = 0;
+            cf call = 0;
+            for (int l = 0; l < 4; l++) {
+                const cf* x = d->buf + s + P1_LEN + l * (n + g);
+                cf c = 0;
+                float e = 0;
+                for (int t = 0; t < g; t++) {
+                    c += x[t] * conjf(x[t + n + k]);
+                    e += 0.5f * (crealf(x[t] * conjf(x[t])) + crealf(x[t + n + k] * conjf(x[t + n + k])));
+                }
+                sc += cabsf(c) / (e + 1e-30f);
+                call += c;
             }
-            sc += cabsf(c) / (e + 1e-30f);
-            call += c;
-        }
-        if (sc > best) {
-            best = sc;
-            bg = gi;
-            bc = call;
+            if (sc > best) {
+                best = sc;
+                bg = gi;
+                bc = call;
+                bk = k;
+            }
         }
     }
+    if (t2_debug())
+        fprintf(stderr, "t2: guard search after the P1: %.2f (guard %d of 7, copy at n%+d; 1.2 needed)\n", best, bg, bk);
     if (best < 4 * 0.3f)
         return -1;
     d->guard_idx = bg;
@@ -1085,7 +1094,7 @@ static int detect_guard(drx_dvbt2* d, int s)
     /* fine carrier offset: the guard interval correlation turns by
      * -2 pi f n, which pins f to within 1/(2n) of the P1 estimate (a 32K
      * carrier is only 1/32768 cycle per sample wide) */
-    const double fcp = -cargf(bc) / (2 * M_PI * n);
+    const double fcp = -cargf(bc) / (2 * M_PI * (n + bk));
     double df = fcp - d->f;
     df -= floor(df * n + 0.5) / n;
     d->f += df;
@@ -2537,7 +2546,7 @@ static int acquire(drx_dvbt2* d)
             return 0;
         if (s < 0)
             continue;
-        if (s + P1_LEN + 4 * (32768 + 8192) + 32768 > d->nbuf) {
+        if (s + P1_LEN + 4 * (32768 + 8192) + 32768 + 2 > d->nbuf) {
             d->pos = s; /* wait for the symbols after it */
             return 0;
         }
