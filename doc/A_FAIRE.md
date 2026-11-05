@@ -101,6 +101,13 @@ T, T2, C et le frontal.
     3 x la fréquence accordée et y replie le DOCSIS et la TV (414-750 MHz, plus forts) ;
     seuls les canaux dont le triple tombe dans un vide passent (242, 258, 266). Il faut un
     filtre passe-bas (~300 MHz) devant pour cette bande ; le HackRF n'a pas ce défaut.
+- **Sortie TS du pont, un write() par paquet** : la couche externe (DVB-T, DVB-C, DVB-S)
+  émet paquet par paquet, soit un appel système vers /dev/dvbrx par paquet (25 000 par
+  seconde en DVB-C 64QAM). Le T2 en souffrait (blocs FEC perdus pendant que tvheadend lisait,
+  corrigé en émettant par BBFRAME) ; le DVB-S2 émet déjà par BBFRAME. Regrouper aussi la
+  sortie de la couche externe (par lots de paquets, avec une vidange régulière).
+- **Mesures T2 : compter fec_errors**, pas ts_errors : en mode HEM (le T2 SFR), les paquets
+  n'ont pas de CRC et un BBFRAME perdu n'apparaît pas dans ts_errors.
 - **DVB-T : accrochage parfois bloqué** dans le service (562, 594, 578 MHz, B210 comme
   bladeRF) : le démodulateur ne s'accroche pas de tout l'accord (l'AGC attend un SNR qui ne
   vient pas), alors que 8 accords de suite passent en 1 s. Rare, non reproduit à la demande.

@@ -2414,13 +2414,19 @@ static void emit_job(drx_dvbt2* d, const struct fecjob* job)
         drx_bb_descramble(d->bbframe, kb);
         drx_bbheader h;
         const int nts = drx_bbdec_frame(d->bb, d->bbframe, kb, d->ts, &h);
-        for (int t = 0; t + 188 <= nts; t += 188) {
+        int t = 0;
+        for (; t + 188 <= nts; t += 188) {
             d->st.packets++;
             if (d->ts[t + 1] & 0x80)
                 d->st.crc_errors++;
-            if (job->cb)
-                job->cb(job->ctx, d->ts + t, 188);
         }
+        /* the BBFRAME's packets at once: emitted packet by packet, they
+         * cost the bridge a write to /dev/dvbrx each (35000 a second at 50
+         * Mbit/s), which held the FEC threads here: frames waited, were
+         * decoded with fewer LDPC iterations, and 0.2 to 4 % of the blocks
+         * failed while tvheadend read the stream (none without it) */
+        if (job->cb && t)
+            job->cb(job->ctx, d->ts, t);
     }
     d->st.locked = d->st.packets > 0;
 }
