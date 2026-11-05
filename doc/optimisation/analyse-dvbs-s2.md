@@ -37,6 +37,11 @@ dans 56 MHz) : le CPU n'est pas limitant.
    consécutifs en échec, forcer une resynchronisation complète (recherche
    d'hypothèse, Forney remis à zéro).
    **Charge : 0,5 jour** (reproduction avec le fichier bouclé, correctif, matrice DVB-S).
+   **Corrigé le 5/11** : la cause était un saut de 180° de la porteuse après la coupure.
+   Les bits inversés échangent 0x47 et 0xB8, et le contrôle de synchro acceptait les deux.
+   La couche externe suit l'inversion quand 0xB8 apparaît 4 fois ou plus sur 8 débuts de
+   paquet. `work/bench/dvbs78_30m.fc32` mis 10 fois bout à bout : 26 503 paquets en échec sur
+   52 884 avant, 126 après (environ 14 par jonction).
 2. **Demi-bande ×2 inutile à 2 échantillons par symbole.** À exactement 2 éch./sym,
    l'interpolation cubique ne perd rien (29,95 contre 29,96 dB sur un signal
    à 30 dB) ; elle perd 0,55 dB à 2,2 et 0,3 dB à 2,4. Activer la demi-bande seulement

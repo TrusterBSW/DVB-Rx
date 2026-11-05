@@ -213,6 +213,7 @@ void outer_reset(struct outer* o)
     o->nsbits = 0;
     o->bits_since_reset = 0;
     o->misses = 0;
+    o->b8hist = 0;
     o->group = -1;
 }
 
@@ -251,7 +252,7 @@ static void output_packet(struct outer* o)
  * the sync: o->q counts them from there. */
 static void bytes_in(struct outer* o, const uint8_t* v, int n)
 {
-    const uint8_t inv = o->invert ? 0xFF : 0;
+    uint8_t inv = o->invert ? 0xFF : 0;
     uint8_t* ring = o->ring;
     int i = 0;
     while (i < n) {
@@ -265,6 +266,18 @@ static void bytes_in(struct outer* o, const uint8_t* v, int n)
                 }
             } else {
                 o->misses = 0;
+                /* 0xB8 starts one packet in 8 (the energy dispersal period).
+                 * When the bits get inverted (a 180-degree slip of the
+                 * carrier after a gap in the stream), 0x47 and 0xB8 swap:
+                 * the sync still looks right but every packet fails. Seven
+                 * 0xB8 in eight: follow the inversion. */
+                o->b8hist = ((o->b8hist << 1) | (s == 0xB8)) & 0xFF;
+                if (__builtin_popcount(o->b8hist) >= 4) {
+                    o->invert ^= 1;
+                    inv ^= 0xFF;
+                    o->b8hist = 0;
+                    o->flips++;
+                }
             }
         }
         const int take = OUTER_PKT - p < n - i ? OUTER_PKT - p : n - i;

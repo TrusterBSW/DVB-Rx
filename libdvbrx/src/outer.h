@@ -32,6 +32,8 @@ struct outer {
     uint8_t byte;
     long q;
     int misses;
+    unsigned b8hist; /* inverted sync bytes (0xB8) among the last 8 packet starts */
+    _Atomic uint64_t flips; /* 180-degree flips of the bits followed while synced */
 
     uint8_t* ring; /* deinterleaver input, OUTER_RING bytes */
     uint8_t pkt[OUTER_PKT];

@@ -7,9 +7,10 @@ T, T2, C et le frontal.
 
 ## Robustesse et qualité de réception
 
-- **Bug de resynchronisation DVB-S** : après certaines coupures du flux,
-  tous les paquets restent en échec RS jusqu'à la coupure suivante. Voir
-  `optimisation/analyse-dvbs-s2.md`, constat 1. Charge : 0,5 jour.
+- *(fait le 5/11)* **Bug de resynchronisation DVB-S** : après une coupure, la porteuse
+  pouvait se raccrocher à 180° ; les bits inversés échangent 0x47 et 0xB8, la synchro
+  paraissait intacte et tous les paquets échouaient. La couche externe suit maintenant
+  l'inversion (7 fois 0xB8 sur 8 débuts de paquet).
 - **Égaliseur pour le DVB-S2 sans pilotes** : apprentissage sur l'en-tête
   (90 symboles) ou piloté par les décisions sur les données. Charge : 0,5-1 jour.
 - **DVB-T2 32K** : refaire l'essai radio (les pertes près du seuil sont
