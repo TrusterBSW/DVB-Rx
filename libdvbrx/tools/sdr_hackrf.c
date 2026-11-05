@@ -6,8 +6,8 @@
  * - The strong DC component of the HackRF is taken out by a DC blocker
  *   (about 300 Hz wide) rather than by tuning off-centre, which would cost
  *   bandwidth out of the 20 MS/s.
- * - One gain, 0 to 116 dB: LNA (0-40 dB by 8), VGA (0-62 dB by 2), and the
- *   14 dB front amplifier only above 102 dB.
+ * - One gain, 0 to 116 dB, filled from the front: the 14 dB amplifier,
+ *   then the LNA (0-40 dB by 8), then the VGA (0-62 dB by 2).
  * - The antenna port power (bias tee) is forced off at every open and
  *   start: it would put DC on the cable.
  * - Overruns of the HackRF's own buffers are counted by its M0 core
@@ -135,21 +135,17 @@ static double hrf_set_gain(struct sdr* s, double gain)
 {
     int g = (int)lround(gain);
     g = g < 0 ? 0 : g > 116 ? 116 : g;
-    const int amp = g > 102;
+    /* Gain from the front: the amplifier, then the LNA, then the VGA. The
+     * HackRF's noise figure is poor without its front stages, and the
+     * signals it is used on (cable channels around -75 dBm behind a
+     * splitter) are noise limited: with the amplifier off and the LNA at
+     * its share, a DVB-C channel read 18 dB of MER instead of 26. The AGC's
+     * best-SNR search steps back if the front stages compress. */
+    const int amp = g >= 14;
     const int rest = g - 14 * amp;
-    /* the LNA / VGA pair closest to the gain asked; on a tie, the LNA
-     * nearest its share of 40/102 (noise figure first, then headroom) */
-    int lna = 0, vga = 0, best = 1 << 30;
-    for (int l = 0; l <= 40; l += 8) {
-        int v = (rest - l + 1) / 2 * 2;
-        v = v < 0 ? 0 : v > 62 ? 62 : v;
-        const int miss = abs(l + v - rest) * 1000 + abs(l * 102 - rest * 40) / 102;
-        if (miss < best) {
-            best = miss;
-            lna = l;
-            vga = v;
-        }
-    }
+    const int lna = rest >= 40 ? 40 : rest / 8 * 8;
+    int vga = (rest - lna + 1) / 2 * 2;
+    vga = vga > 62 ? 62 : vga;
     hrf_check(hackrf_set_amp_enable(s->dev, (uint8_t)amp), "amplifier");
     hrf_check(hackrf_set_lna_gain(s->dev, (uint32_t)lna), "LNA gain");
     hrf_check(hackrf_set_vga_gain(s->dev, (uint32_t)vga), "VGA gain");
