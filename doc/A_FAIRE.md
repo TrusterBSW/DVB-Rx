@@ -60,13 +60,17 @@ T, T2, C et le frontal.
     (566, 574, 590 MHz), absentes entre canaux DVB-C (606 MHz) et dans une bande vide
     (710-730 MHz). Elles arrivent par le coaxial (presque rien sur l'entrée RX2 non câblée) et
     ne dépendent pas de la charge de l'hôte.
-  - **Explication probable** : la TNT est reprise par antenne en tête de réseau et transposée
-    en bloc, avec le bruit impulsif capté par l'antenne. Aucun récepteur ne peut l'éliminer ;
-    seul l'écart au seuil compte.
+  - **Dans le signal reçu** : leur rapport au signal ne change pas quand le gain du B210 varie
+    de 38 à 50 dB. Le MER de base (environ 25 dB) varie à peine non plus : il est limité par le
+    signal lui-même, pas par le bruit propre du B210 (un préampli n'apporterait rien). Le bloc
+    TNT est remodulé par SFR (fréquences et noms SFR) : la source probable est le modulateur
+    multicanal ou la tête de réseau (écrêtage du bloc, par exemple).
+  - **Seuil de dvbrx** (bruit blanc, 8K 64QAM 5/6) : 1 paquet perdu sur 2 747 à 18,8 dB de MER
+    mesuré, 39 % à 18,5 dB, quasiment tous à 18,3 dB ; environ 18,3 dB de C/N dans la bande
+    (norme : 19,3 dB). Un téléviseur ne ferait pas mieux sur ces symboles ; ses pertes passent
+    sans doute inaperçues (masquage d'erreurs, environ 0,05 % des paquets).
   - **Fait** : lissage de l'estimation de canal (MER +1,1 dB, pertes divisées par 1,8 sur une
-    capture de 20 s).
-  - **Reste possible** : un préampli faible bruit (au mieux environ +1 dB sur les symboles
-    touchés). Le DVB-T2 (586 MHz), avec entrelacement temporel et LDPC, y résiste.
+    capture de 20 s). Au-dessus de 53 dB de gain, l'entrée du B210 sature.
   - **Trace** : `DRX_T_DEBUG=1` (par symbole, et erreur par seizième de bande quand le MER chute).
 
 ## Matériel radio
