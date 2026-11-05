@@ -52,6 +52,11 @@ dans 56 MHz) : le CPU n'est pas limitant.
    les trames à pilotes. Pour l'APSK sans pilotes à fort débit, on peut
    l'apprendre sur les 90 symboles d'en-tête, ou en mode piloté par les décisions sur les données.
    **Charge : 0,5 à 1 jour.**
+   **Fait le 5/11** : apprentissage sur l'en-tête et sur les décisions sûres (erreur
+   inférieure à 0,1 dmin²) des 1 024 premiers symboles. Sur chaque trame au début, puis
+   une sur 4, puis une sur 16. Les coefficients ne sont gardés que s'ils réduisent
+   l'erreur résiduelle d'au moins 0,3 dB par rapport à l'absence d'égalisation. Le filtre
+   n'est plus appliqué tant que les coefficients valent l'unité.
 
 ## Pistes CPU (gain estimé, charge)
 

@@ -11,11 +11,22 @@ T, T2, C et le frontal.
   pouvait se raccrocher à 180° ; les bits inversés échangent 0x47 et 0xB8, la synchro
   paraissait intacte et tous les paquets échouaient. La couche externe suit maintenant
   l'inversion (7 fois 0xB8 sur 8 débuts de paquet).
-- **Égaliseur pour le DVB-S2 sans pilotes** : apprentissage sur l'en-tête
-  (90 symboles) ou piloté par les décisions sur les données. Charge : 0,5-1 jour.
-- **DVB-T2 32K** : refaire l'essai radio (les pertes près du seuil sont
-  corrigées hors ligne, avec le plafond LDPC à 30/15 et `NFEC` 3, mais pas
-  encore revérifiées en radio).
+- *(fait le 5/11)* **Égaliseur pour le DVB-S2 sans pilotes** : apprentissage sur l'en-tête et
+  sur les décisions sûres de la boucle de phase (1 024 premiers symboles). Les coefficients ne
+  sont appliqués que s'ils battent l'absence d'égalisation d'au moins 0,3 dB.
+  - 16APSK 3/4 avec un écho à -10 dB : 0 → 1 413-1 445 paquets sur 1 595.
+  - 32APSK 3/4 avec un écho à -8 dB : SNR mesuré 13,7 → 21,7 dB.
+  - Sans écho, rien ne change. S2X sans pilotes à 3 dB de Shannon : 30/55 contre 28/55 sans
+    égaliseur, aucune régression ; avec pilotes : 55/55.
+  - Reste : la récupération de porteuse sans pilotes à faible marge (16APSK 26/45 à 3/5,
+    8PSK courtes, 256APSK 116/180...), qui échoue avec ou sans égaliseur.
+- **DVB-T2 32K** (5/11) : en direct sur le 586 MHz SFR (32K étendu 256QAM 5/6, sans
+  entrelacement temporel), 120 s par tvheadend : 0,3 % de blocs FEC en échec (bouffées du
+  bloc TNT), 17 paquets TS en erreur sur 4 M, aucun échantillon perdu, 90 % d'un cœur. Rejoué
+  en temps réel avec du bruit de part et d'autre du seuil : aucun échantillon perdu (environ
+  170 % de CPU). Le seuil mesuré est vers 22-23 dB de C/N dans la bande, soit environ 2 dB de
+  plus que la table de la norme (256QAM 5/6) : l'écart du démodulateur T2 au seuil théorique
+  serait à mesurer sur signal synthétique.
 - **DVB-C** : validé en radio (B210 en émission : 256-QAM à 31 dB) et sur
   le câble SFR (602 MHz, 64-QAM, 28,5 dB, le 4/11/2026).
 - **DVB-T2 sur le câble SFR (586 MHz)** : reçu depuis le 4/11/2026, avec France 2

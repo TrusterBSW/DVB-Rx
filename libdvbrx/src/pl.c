@@ -41,16 +41,20 @@ typedef float complex cf;
 #define SLIP 2 /* symbols of timing slip tolerated between headers */
 
 /* Equaliser: symbol-spaced complex FIR of EQ_N taps, trained by least
- * squares on the known symbols (header and pilots) of one pilot frame in
- * EQ_EVERY, with forgetting. The analog filters of wideband SDRs (two
- * AD9361 back to back at 45 Mbaud) leave inter-symbol interference that
- * capped the SNR at 18 dB. */
+ * squares on one frame in EQ_EVERY, with forgetting: on the known symbols
+ * (header and pilots) of pilot frames; without pilots, on the header and
+ * the confident decisions of the carrier loop over the first EQ_DD_LEN
+ * symbols. The analog filters of wideband SDRs (two AD9361 back to back at
+ * 45 Mbaud) leave inter-symbol interference that capped the SNR at 18 dB. */
 #define EQ_D 7
 #define EQ_N (2 * EQ_D + 1)
 #define EQ_EVERY 4
 #define EQ_EVERY_SLOW 16
 #define EQ_LAMBDA 0.7
 #define EQ_KEEP 16 /* symbols kept before the frame (>= EQ_D) */
+#define EQ_DD_LEN 1024  /* symbols of a pilotless frame used for training */
+#define EQ_DD_CONF 0.1f /* decisions kept: |error|^2 below this x dmin^2 */
+#define EQ_DD_GAIN 0.93 /* residual needed against no equalisation (0.3 dB) */
 
 #define TH_DETECT 0.4f  /* normalised header metric, search */
 #define TH_CONFIRM 0.3f /* next header, before locking */
@@ -94,6 +98,7 @@ struct constellation {
     int n;
     cf p[256];
     float inv_e[256]; /* 1 / |p|^2 */
+    float dmin2;      /* squared distance between the closest two points */
     drx_demap* dm;    /* fast nearest-point search for dense constellations */
     /* Hard decisions: nearest point for each cell of a grid over the I/Q
      * plane when the whole cell is in one decision region, -1 otherwise
@@ -133,9 +138,12 @@ struct drx_pl {
 
     /* equaliser, see EQ_N */
     int eq_on, eq_count, eq_phase;
+    int eq_ident; /* taps still the identity: nothing to apply */
     cf eq_w[EQ_N];
     double complex eq_R[EQ_N][EQ_N], eq_p[EQ_N];
+    double eq_c; /* sum of |target|^2, for the residual of a solution */
     cf* yeq;
+    cf* eq_t; /* pilotless training: target of each symbol before the carrier, 0 to skip */
     /* carrier of the last pilot-aided frame: phase ph[s] + slope[s] k
      * (plus omega0 k) in segment s, see frame_pilot_aided() */
     double fr_ph[MAX_PILOTS + 2], fr_slope[MAX_PILOTS + 2], fr_omega0;
@@ -493,6 +501,14 @@ static struct constellation* get_constellation(drx_pl* pl, const drx_modcod* m)
         (*c)->inv_e[i] = 1.0f / (re[i] * re[i] + im[i] * im[i] + 1e-20f);
     }
     (*c)->dm = d;
+    float dmin2 = 1e30f;
+    for (int i = 0; i < (*c)->n; i++)
+        for (int j = i + 1; j < (*c)->n; j++) {
+            const cf e = (*c)->p[i] - (*c)->p[j];
+            const float v = crealf(e * conjf(e));
+            dmin2 = v < dmin2 ? v : dmin2;
+        }
+    (*c)->dmin2 = dmin2;
     build_grid(*c);
     return *c;
 }
@@ -526,9 +542,11 @@ static void eq_reset(drx_pl* pl)
 {
     memset(pl->eq_R, 0, sizeof(pl->eq_R));
     memset(pl->eq_p, 0, sizeof(pl->eq_p));
+    pl->eq_c = 0;
     for (int m = 0; m < EQ_N; m++)
         pl->eq_w[m] = m == EQ_D ? 1.0f : 0.0f;
     pl->eq_count = pl->eq_phase = 0;
+    pl->eq_ident = 1;
 }
 
 drx_pl* drx_pl_new(int gold_code)
@@ -541,7 +559,8 @@ drx_pl* drx_pl_new(int gold_code)
     pl->out = malloc(sizeof(cf) * MAX_PAYLOAD);
     pl->z = malloc(sizeof(cf) * (MAX_FRAME + SOF_LEN));
     pl->yeq = malloc(sizeof(cf) * (MAX_FRAME + SOF_LEN));
-    if (!pl->buf || !pl->descr || !pl->out || !pl->z || !pl->yeq) {
+    pl->eq_t = malloc(sizeof(cf) * EQ_DD_LEN);
+    if (!pl->buf || !pl->descr || !pl->out || !pl->z || !pl->yeq || !pl->eq_t) {
         drx_pl_free(pl);
         return NULL;
     }
@@ -594,6 +613,7 @@ void drx_pl_free(drx_pl* pl)
     free(pl->out);
     free(pl->z);
     free(pl->yeq);
+    free(pl->eq_t);
     free(pl);
 }
 
@@ -903,7 +923,7 @@ static int frame_pilot_aided(drx_pl* pl, const struct pls* h, const cf* hdr, con
  * plain block update degraded 16APSK near threshold.
  */
 static int frame_pll(drx_pl* pl, const struct pls* h, const cf* hdr, const cf* z, cf* out,
-                     double* err, int* n_err)
+                     double* err, int* n_err, cf* train, double omega0)
 {
     const struct constellation* cons = get_constellation(pl, &h->mc);
     if (!cons)
@@ -942,6 +962,21 @@ static int frame_pll(drx_pl* pl, const struct pls* h, const cf* hdr, const cf* z
                 out[nout++] = v;
             }
             e[i] = cimagf(v * conjf(ref)) * inv_e;
+            if (train && k < EQ_DD_LEN) {
+                /* the decision back where the equaliser output is: undo the
+                 * loop's rotation and amplitude, the omega ramp of
+                 * derotate() and the descrambling */
+                const cf d = v - ref;
+                if (k < HDR_LEN || crealf(d * conjf(d)) < EQ_DD_CONF * cons->dmin2) {
+                    const cf r = rot + (float)i * drot;
+                    cf t = ref * conjf(r) / (crealf(r * conjf(r)) + 1e-30f) * (cf)cexp(I * omega0 * k);
+                    if (k >= HDR_LEN)
+                        t *= conjf(pl->descr[k - HDR_LEN]);
+                    train[k] = t;
+                } else {
+                    train[k] = 0;
+                }
+            }
         }
         float sum = (float)(nb * dw), step = 0;
         if (nb == PLL_BLOCK) {
@@ -1032,6 +1067,12 @@ static void eq_apply(const drx_pl* pl, const cf* y, int before, int after, int n
     }
 }
 
+static void eq_forget(drx_pl* pl);
+static void eq_add(drx_pl* pl, const cf* u, double complex t);
+static void eq_solve(drx_pl* pl);
+static int eq_solve_into(const drx_pl* pl, cf* w);
+static double eq_cost(const drx_pl* pl, const cf* w);
+
 /* Least squares update on the known symbols of a pilot frame: y (not
  * equalised) against the reference symbols with the carrier phase and
  * amplitude that frame_pilot_aided() measured on the equalised frame. */
@@ -1039,11 +1080,7 @@ static void eq_train(drx_pl* pl, const cf* y, int before, int after, const struc
                      const cf* hdr)
 {
     const cf pilot = (1.0f + 1.0f * I) * (float)M_SQRT1_2;
-    for (int i = 0; i < EQ_N; i++) {
-        pl->eq_p[i] *= EQ_LAMBDA;
-        for (int j = i; j < EQ_N; j++)
-            pl->eq_R[i][j] *= EQ_LAMBDA;
-    }
+    eq_forget(pl);
     const int nb = 1 + h->npilots, nseg = pl->fr_nseg;
     for (int b = 0; b < nb; b++) {
         const int k0 = b ? pilot_start(b - 1) : 0, len = b ? PILOT_LEN : HDR_LEN;
@@ -1058,15 +1095,62 @@ static void eq_train(drx_pl* pl, const cf* y, int before, int after, const struc
             const double phi = pl->fr_omega0 * k + pl->fr_ph[s] + pl->fr_slope[s] * k;
             double complex t = pl->fr_amp * cexp(I * phi);
             t *= b ? pilot * conjf(pl->descr[k - HDR_LEN]) : hdr[k];
-            const cf* u = y + k - EQ_D;
-            for (int i = 0; i < EQ_N; i++) {
-                const double complex ci = conj((double complex)u[i]);
-                pl->eq_p[i] += ci * t;
-                for (int j = i; j < EQ_N; j++)
-                    pl->eq_R[i][j] += ci * u[j];
-            }
+            eq_add(pl, y + k - EQ_D, t);
         }
     }
+    eq_solve(pl);
+}
+
+/* Pilotless frame: the targets frame_pll() left in eq_t (0: skipped). */
+static void eq_train_dd(drx_pl* pl, const cf* y, int before, int after, int n)
+{
+    eq_forget(pl);
+    int used = 0;
+    for (int k = EQ_D - before > 0 ? EQ_D - before : 0; k < n && k + EQ_D < after; k++)
+        if (pl->eq_t[k] != 0) {
+            eq_add(pl, y + k - EQ_D, pl->eq_t[k]);
+            used++;
+        }
+    if (used <= 4 * EQ_N)
+        return;
+    /* Decisions near the threshold are partly wrong and noisy: the taps are
+     * only worth it when they clearly beat no equalisation (an echo or the
+     * ripple of the analog filters gives several dB; a clean channel only
+     * fits the noise) */
+    cf w[EQ_N], id[EQ_N] = { 0 };
+    id[EQ_D] = 1;
+    if (eq_solve_into(pl, w))
+        return;
+    const int use = eq_cost(pl, w) < EQ_DD_GAIN * eq_cost(pl, id);
+    memcpy(pl->eq_w, use ? w : id, sizeof(w));
+    pl->eq_ident = !use;
+}
+
+static void eq_forget(drx_pl* pl)
+{
+    pl->eq_c *= EQ_LAMBDA;
+    for (int i = 0; i < EQ_N; i++) {
+        pl->eq_p[i] *= EQ_LAMBDA;
+        for (int j = i; j < EQ_N; j++)
+            pl->eq_R[i][j] *= EQ_LAMBDA;
+    }
+}
+
+/* One equation: equaliser input u[0..EQ_N) should give t. */
+static void eq_add(drx_pl* pl, const cf* u, double complex t)
+{
+    pl->eq_c += creal(t * conj(t));
+    for (int i = 0; i < EQ_N; i++) {
+        const double complex ci = conj((double complex)u[i]);
+        pl->eq_p[i] += ci * t;
+        for (int j = i; j < EQ_N; j++)
+            pl->eq_R[i][j] += ci * u[j];
+    }
+}
+
+/* Taps from the normal equations into w; -1 if R is not positive. */
+static int eq_solve_into(const drx_pl* pl, cf* w)
+{
     /* Cholesky of R (Hermitian, upper triangle stored), lightly loaded */
     double complex L[EQ_N][EQ_N], z[EQ_N], x[EQ_N];
     double tr = 0;
@@ -1080,7 +1164,7 @@ static void eq_train(drx_pl* pl, const cf* y, int before, int after, const struc
                 sum -= L[i][m] * conj(L[j][m]);
             if (j == i) {
                 if (creal(sum) <= 0)
-                    return;
+                    return -1;
                 L[i][i] = sqrt(creal(sum));
             } else {
                 L[i][j] = sum / L[j][j];
@@ -1100,7 +1184,33 @@ static void eq_train(drx_pl* pl, const cf* y, int before, int after, const struc
         x[i] = sum / L[i][i];
     }
     for (int i = 0; i < EQ_N; i++)
-        pl->eq_w[i] = (cf)x[i];
+        w[i] = (cf)x[i];
+    return 0;
+}
+
+static void eq_solve(drx_pl* pl)
+{
+    cf w[EQ_N];
+    if (!eq_solve_into(pl, w)) {
+        memcpy(pl->eq_w, w, sizeof(w));
+        pl->eq_ident = 0;
+    }
+}
+
+/* Residual sum |w.u - t|^2 = c - 2 Re(w^H p) + w^H R w over the equations
+ * gathered (R: upper triangle stored). */
+static double eq_cost(const drx_pl* pl, const cf* w)
+{
+    double complex q = 0;
+    for (int i = 0; i < EQ_N; i++)
+        for (int j = 0; j < EQ_N; j++) {
+            const double complex r = i <= j ? pl->eq_R[i][j] : conj(pl->eq_R[j][i]);
+            q += conj((double complex)w[i]) * r * w[j];
+        }
+    double complex wp = 0;
+    for (int i = 0; i < EQ_N; i++)
+        wp += conj((double complex)w[i]) * pl->eq_p[i];
+    return pl->eq_c - 2 * creal(wp) + creal(q);
 }
 
 /* Carrier recovery and output of one PLFRAME starting at y. next_sof: the
@@ -1115,7 +1225,7 @@ static void process_frame(drx_pl* pl, const cf* y, const struct pls* h, const cf
     }
     const cf* yraw = y;
     const int before = (int)(y - pl->buf), after = (int)(pl->buf + pl->len - y);
-    if (pl->eq_on) {
+    if (pl->eq_on && !pl->eq_ident) {
         eq_apply(pl, y, before, after, h->len + (next_sof ? SOF_LEN : 0), pl->yeq);
         y = pl->yeq;
     }
@@ -1137,16 +1247,26 @@ static void process_frame(drx_pl* pl, const cf* y, const struct pls* h, const cf
         out = pl->out;
     double err = 0;
     int n_err = 0, nout;
+    /* without pilots, every frame at first: the decisions get better as it
+     * converges */
+    const int every = !h->pilots && pl->eq_count < 16 ? 1 : pl->eq_count < 64 ? EQ_EVERY : EQ_EVERY_SLOW;
+    const int train = pl->eq_on && pl->eq_phase++ % every == 0;
     if (h->pilots)
         nout = frame_pilot_aided(pl, h, hdr, y, pl->z, omega0, next_sof, out, &err, &n_err);
     else
-        nout = frame_pll(pl, h, hdr, pl->z, out, &err, &n_err);
+        nout = frame_pll(pl, h, hdr, pl->z, out, &err, &n_err, train ? pl->eq_t : NULL, omega0);
     pl->have_amp = 1;
     if (!nout)
         return;
-    if (pl->eq_on && h->pilots &&
-        pl->eq_phase++ % (pl->eq_count < 64 ? EQ_EVERY : EQ_EVERY_SLOW) == 0) {
-        eq_train(pl, yraw, before, after, h, hdr);
+    if (train) {
+        if (h->pilots) {
+            eq_train(pl, yraw, before, after, h, hdr);
+        } else {
+            /* decisions are only worth training on when the frame is sound */
+            const float snr = 10.0f * log10f((float)(n_err ? n_err : 1) / ((float)err + 1e-20f));
+            if (snr > qef_db(&h->mc) - 3.0f)
+                eq_train_dd(pl, yraw, before, after, h->len < EQ_DD_LEN ? h->len : EQ_DD_LEN);
+        }
         pl->eq_count++;
     }
 
