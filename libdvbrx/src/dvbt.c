@@ -284,6 +284,7 @@ struct drx_dvbt {
     int nbuf, cap, pos;
 
     int state;
+    int inv; /* spectrum inverted: the samples are conjugated as they come */
     struct mode m;
     struct fft fft;
     int g, nsym_len;
@@ -646,25 +647,41 @@ static void advance(drx_dvbt* d, int samples)
 }
 
 /* Integer carrier offset: the continual pilots stay put from symbol to
- * symbol, the data does not. */
-static void intcfo(drx_dvbt* d)
+ * symbol, the data does not. Their pattern is not symmetric: found mirrored
+ * (clearly better), the spectrum is inverted; returns 1 then. */
+static int intcfo(drx_dvbt* d)
 {
     const int n = d->m.n, imax = n / 16;
-    float best = -1;
+    float best = -1, best_m = -1;
     int bi = 0;
     for (int off = -imax; off <= imax; off++) {
-        cf s = 0;
+        cf s = 0, sm = 0;
         for (int i = 0; i < d->m.ncp; i++) {
             const int b = (d->m.cp[i] - d->m.kc + off + 2 * n) % n;
+            const int bm = (d->m.kc - d->m.cp[i] + off + 2 * n) % n;
             s += d->win[b] * conjf(d->prev[b]);
+            sm += d->win[bm] * conjf(d->prev[bm]);
         }
-        const float v = cabsf(s);
+        const float v = cabsf(s), vm = cabsf(sm);
         if (v > best) {
             best = v;
             bi = off;
         }
+        if (vm > best_m)
+            best_m = vm;
     }
+    if (best_m > 1.5f * best)
+        return 1;
     d->f += (double)bi / n;
+    return 0;
+}
+
+/* Conjugates the samples from i on (spectral inversion). */
+static void conj_samples(drx_dvbt* d, int i)
+{
+    float* p = (float*)(d->buf + i);
+    for (int k = 1; k < 2 * (d->nbuf - i); k += 2)
+        p[k] = -p[k];
 }
 
 /* ---- TPS -------------------------------------------------------------------- */
@@ -1428,8 +1445,16 @@ static void run(drx_dvbt* d)
         if (d->state == ST_INTCFO) {
             /* INTCFO works on the FFT bins (d->win) of two windows */
             demod_window(d);
+            if (d->have_prev && intcfo(d)) {
+                /* inverted spectrum: conjugate what is buffered and what
+                 * comes, and detect again */
+                d->inv ^= 1;
+                conj_samples(d, d->pos);
+                d->state = ST_DETECT;
+                d->have_prev = 0;
+                continue;
+            }
             if (d->have_prev) {
-                intcfo(d);
                 d->state = ST_TRACK;
                 d->have_prev = 0;
                 d->sp = -1;
@@ -1501,6 +1526,8 @@ void drx_dvbt_demod(drx_dvbt* d, const float* x, int n, double step, drx_dvbt_cb
         return;
     memcpy(d->buf + d->nbuf, x, sizeof(cf) * n);
     d->nbuf += n;
+    if (d->inv)
+        conj_samples(d, d->nbuf - n);
     run(d);
 }
 
@@ -1512,7 +1539,10 @@ void drx_dvbt_process(drx_dvbt* d, const float* iq, int n, drx_dvbt_cb cb, void*
     if (reserve(d, room))
         return;
     double step;
+    const int at = d->nbuf;
     d->nbuf += drx_dvbt_resample(d, iq, n, (float*)(d->buf + d->nbuf), d->cap - d->nbuf, &step);
+    if (d->inv)
+        conj_samples(d, at);
     set_step(d, step);
     run(d);
 }

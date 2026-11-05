@@ -25,7 +25,8 @@ T, T2, C et le frontal.
   n'est plus nécessaire). Blocs FEC perdus : environ 0,6 % à 25,7 dB (470 → 230
   en 40 s). Reste à améliorer : un filtre RF de bande avant le B210 (le
   DOCSIS pèse encore sur l'ampli d'entrée et le mélangeur) ; le suivi d'horloge
-  et de phase sur les porteuses des bords ; l'inversion pour le DVB-T. La
+  et de phase sur les porteuses des bords. (L'inversion spectrale du DVB-T est faite
+  depuis le 5/11.) La
   répartition du gain dans l'AD9361 (moins d'ampli d'entrée, plus de gain après
   le filtre) n'est pas accessible par UHD (un seul élément « PGA », et l'AGC
   matérielle telle que UHD la configure affame le convertisseur) : il faudrait

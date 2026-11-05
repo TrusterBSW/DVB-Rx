@@ -50,7 +50,7 @@ def channel(src, dst, in_rate, out_rate, snr, freq):
                 str(out_rate), "--ppm", "15", "--freq", str(freq), "--snr", str(snr)])
 
 
-def ofdm_case(kind, name, gen_cmd, bw, snr, extra_rx=()):
+def ofdm_case(kind, name, gen_cmd, bw, snr, extra_rx=(), invert=False):
     raw = os.path.join(W, "raw.fc32")
     rx_in = os.path.join(W, "rx.fc32")
     t0 = time.time()
@@ -59,6 +59,9 @@ def ofdm_case(kind, name, gen_cmd, bw, snr, extra_rx=()):
         record(name, False, "generator failed: " + out.strip().splitlines()[-1][:80])
         return
     rc, out = channel(raw, rx_in, elem(bw), SDR[bw], snr, 3000 * bw / 8)
+    if invert:  # spectrum inverted: the conjugate signal
+        import numpy as np
+        np.conj(np.fromfile(rx_in, np.complex64)).astype(np.complex64).tofile(rx_in)
     flag = "-T" if kind == "dvbt" else "-2"
     rc, out = run([RX, flag, str(bw), "-S", str(SDR[bw]), *extra_rx, rx_in, os.devnull])
     m = re.search(r"ts (\d+) packets", out)
@@ -94,6 +97,10 @@ def dvbt():
         name = f"DVB-T {mode} {qam}-QAM {rate} GI {guard} {bw} MHz"
         ofdm_case("dvbt", name, ["python3", "tests/dvbt_gen.py", "--mode", mode, "--qam", str(qam),
                                  "--rate", rate, "--guard", guard], bw, cn[(qam, rate)] + 4)
+    for mode in modes:
+        ofdm_case("dvbt", f"DVB-T {mode} 64-QAM 3/4 GI 1/32 8 MHz, spectre inversé",
+                  ["python3", "tests/dvbt_gen.py", "--mode", mode, "--qam", "64", "--rate", "3/4", "--guard", "1/32"],
+                  8, cn[(64, "3/4")] + 4, invert=True)
 
 
 def dvbt2():
