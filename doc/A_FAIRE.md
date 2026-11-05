@@ -75,39 +75,31 @@ T, T2, C et le frontal.
 
 ## Matériel radio
 
-État actuel : seul UHD (B200/B210, dont le clone LibreSDR) est géré.
-`tools/dvbrx.c` contient une `struct radio` propre à UHD (`#ifdef HAVE_UHD`),
-plus une source fichier. libhackrf, libbladeRF et SoapySDR sont installés
-sur le portable.
-
-- **BladeRF** (libbladeRF) :
-  - bladeRF 2.0 micro : AD9361 comme le B210, jusqu'à 61,44 MS/s, 12 bits.
-    Mêmes débits que le B210, et l'égaliseur PL sera tout aussi utile aux
-    débits élevés ;
-  - bladeRF x40/x115 (LMS6002D) : 40 MS/s.
-  
-  Points d'attention :
-  - horodatage des blocs (API sync avec métadonnées), pour combler les trous
-    de débordement comme avec UHD ;
-  - format SC16Q11, à convertir en fc32 ou à passer directement en sc16.
-- **HackRF** (libhackrf) :
-  - 20 MS/s au maximum et ADC 8 bits, environ 40-45 dB de dynamique (en
-    émission, il plafonnait le DVB-C 256-QAM à 17,8 dB) ;
-  - semi-duplex, sans horodatage : détection des pertes par compteur
-    d'échantillons seulement ;
-  - gains LNA, VGA et amplificateur séparés, à intégrer à l'AGC `-G auto` ;
-  - limité aux débits symbole modérés (DVB-S/S2 jusqu'à environ 15 MBd, et C, T, T2).
-- **Approche** : extraire une interface radio (ouvrir, accorder, régler le
-  gain, démarrer/arrêter, lire avec horodatage et débordements, niveau
-  d'entrée), puis un backend par pilote.
-  - Variante : un backend SoapySDR couvrirait HackRF, BladeRF, RTL-SDR,
-    LimeSDR et Pluto d'un coup. Les métadonnées de temps et de débordement
-    varient selon les modules.
-  - Charge : environ 1 jour pour l'interface (en gardant UHD identique), puis
-    0,5-1 jour par backend natif (ou 1-1,5 jour pour SoapySDR), plus les essais radio.
-  - Options de ligne de commande : `-u` devient un argument générique
-    (`uhd:type=b200`, `bladerf:`, `hackrf:`), avec le même service
-    `dvbrxd@N` et la même AGC.
+- **Fait** (2026-11-05) : interface de pilote SDR (`libdvbrx/tools/sdr.h`), avec UHD
+  (`sdr_uhd.c`) et bladeRF par libbladeRF (`sdr_bladerf.c`).
+  - `-u [PILOTE:]ARGS` : `uhd:type=b200` (ou sans préfixe, comme avant), `bladerf:` (premier
+    bladeRF) ou `bladerf:*:serial=...`.
+  - Le Makefile compile chaque pilote dont la bibliothèque est installée.
+  - bladeRF : entrées `-A RX1` (par défaut) ou `-A RX2`. Échantillons SC16 Q11 horodatés :
+    les trous sont comblés comme avec UHD. Le gain, le débit et le filtre viennent des plages
+    annoncées par la carte.
+  - Le multicanal (hub) est au-dessus de l'interface : il marche tel quel avec le bladeRF 2.0
+    (même puce et mêmes débits que le B210). Il reste à le valider sur la carte.
+- **À valider avec la carte** (bladeRF 2.0 micro xA4) :
+  - L'image FPGA `hostedxA4.rbf` (v0.15.x pour libbladeRF 2024.05) n'est pas dans les dépôts
+    de l'hôte. À télécharger chez Nuand dans `/usr/share/Nuand/bladeRF/`, sauf si la carte la
+    charge depuis sa flash.
+  - Puis réception autonome, service `dvbrxd` (`-u bladerf: -A RX1`), dvbrx-web, AGC et
+    multicanal.
+- **HackRF** (libhackrf), si on le fait :
+  - 20 MS/s au maximum, ADC 8 bits (environ 45 dB de dynamique) ;
+  - pas d'horodatage (pertes non comblées) ;
+  - lecture par rappel (une file vers le fil radio) ;
+  - raie de continu à éviter (accord décalé et recentrage numérique) ;
+  - gain LNA, VGA et ampli à combiner pour l'AGC ;
+  - alimentation d'antenne à verrouiller à l'arrêt ;
+  - sans multicanal ; dvbrx-web doit connaître le débit maximal de la radio.
+  - Charge : environ 1 à 1,5 jour.
 
 ## Autres
 

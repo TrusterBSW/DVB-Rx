@@ -1,6 +1,7 @@
 /*
- * dvbrx: real-time DVB receiver (S/S2/S2X, C, T, T2) for a USRP (UHD) or an
- * IQ file; runs as the dvbrxd@N service in DVB bridge mode.
+ * dvbrx: real-time DVB receiver (S/S2/S2X, C, T, T2) for an SDR (USRP through
+ * UHD, bladeRF through libbladeRF; see tools/sdr.h) or an IQ file; runs as the
+ * dvbrxd@N service in DVB bridge mode.
  *
  * Standalone:  dvbrx (-u ARGS -f FREQ | -F FILE) -s SYMRATE [-o DEST] ...
  * DVB bridge:  dvbrx -d N (-u ARGS | -F FILE) [-L LNB] ...
@@ -28,11 +29,12 @@
  *   -B HZ       analog baseband filter bandwidth (default: the occupied
  *               bandwidth of the channel + 15 %, or the whole capture for
  *               several channels; 0: UHD's choice)
- *   -A ANT      receive antenna, e.g. "TX/RX" or "RX2" (default: UHD's)
+ *   -A ANT      receive antenna: UHD "TX/RX" or "RX2" (default: UHD's),
+ *               bladeRF "RX1" (default) or "RX2"
  *   -C PATH     bridge mode: control socket for dvbrx-web (default
  *               /run/dvbrx/dvbrx-N.sock, "" for none), see doc/dvbrx-web-api.md
  *   -P DB       input power estimate: dBm at 0 dBFS and 0 dB gain (default 0)
- *   -M HZ       master clock rate (default: chosen by UHD)
+ *   -M HZ       master clock rate (UHD; default: chosen by UHD)
  *   -r ROLLOFF  roll-off (standalone, default 0.2)
  *   -D SYMBOLS  matched filter half-length (default: from the roll-off)
  *   -g GOLD     PL scrambling gold code (standalone, default 0), rN: root code
