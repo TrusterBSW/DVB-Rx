@@ -153,6 +153,14 @@ T, T2, C et le frontal.
 
 ## HackRF : sauts de phase périodiques (6/11/2026)
 
+**Cause localisée (6/11/2026, 17 h 19) : l'hôte, pas la carte.** Le même
+HackRF branché en direct sur l'i3 8100T (contrôleur xHCI, sans hub), même
+émission de contrôle sur le câble fermé : 0 saut en 3 s, porteuse ~24 dB
+au-dessus du bruit. Sur 10.5.1.2, il était derrière un petit hub USB 2 non
+alimenté (Terminus 1a40:0101) : 77 sauts en 3 s. À vérifier : HackRF en direct
+sur 10.5.1.2 (hub ou alimentation USB de l'hôte ?), ou derrière un hub
+alimenté. Les notes ci-dessous datent d'avant ce constat.
+
 Sur le câble fermé (dvbtx, DVB-S QPSK 3/4 10 Msym/s à 1200 MHz), le HackRF
 verrouille avec 11 à 20 dB de SNR mais perd ~3,5 % des paquets quel que soit le
 gain (50, 60, 70 dB ou auto), sans écrêtage ni perte USB (compteur M0 à 0) ;
