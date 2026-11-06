@@ -162,8 +162,10 @@ Le module noyau `kernel/dvbrx` crée des adaptateurs DVB-S/S2 classiques
 | | USRP B210 | bladeRF 2.0 micro | HackRF One |
 |---|---|---|---|
 | `-u` | `uhd:serial=…` (ou `type=b200`) | `bladerf:*:serial=…` | `hackrf:NUMÉRO` |
-| Débit max | 56 Msps (61,44) | 61,44 Msps | 20 Msps |
-| Débit symbole max (1,5 éch./symbole) | ~37-40 Msym/s | ~40 Msym/s | 13,3 Msym/s |
+| Débit max | 61,44 Msps | 61,44 Msps | 20 Msps |
+| Débit symbole max, DVB-S (roll-off 0,35) | 41 Msym/s | 41 Msym/s | 13,3 Msym/s |
+| DVB-S2 roll-off 0,20 / 0,05 | 46 / 52,7 Msym/s | 46 / 52,7 Msym/s | 15 / 17,1 Msym/s |
+| DVB-C (roll-off 0,15) | 48 Msym/s | 48 Msym/s | 15,6 Msym/s |
 | Sensibilité (câble SFR, 5/11/2026) | référence | ≈ B210 (±1,5 dB) | 6-7 dB de moins |
 | Horodatage (trous comblés) | oui | oui (FPGA ≤ 0.15) | non |
 | Multicanal (`-n`, `-m`) | oui | oui | non |
@@ -174,13 +176,28 @@ Le module noyau `kernel/dvbrx` crée des adaptateurs DVB-S/S2 classiques
 - B210 et bladeRF (AD9361) : entre 138 et 250 MHz, les signaux à trois fois
   la fréquence accordée se replient dans la bande (filtre passe-bas ~300 MHz
   nécessaire).
-- Débit symbole maximal : le démon l'annonce au frontend (`FE_GET_INFO`,
-  `DVBRX_IOC_LIMITS`), d'après le débit de la carte (÷ 1,5) ou, en
-  multicanal, la bande utile de la capture. dvb-core refuse alors aussitôt
-  (`EINVAL`) un réglage DVB-S/S2/C au-delà, par exemple un transpondeur de
-  27 500 kBd sur un HackRF ; tvheadend affiche « failed to tune » et passe
-  à un autre tuner libre (essai du 6/11/2026 : bascule sur le bladeRF, flux
-  en 2,9 s). Sans autre tuner, la chaîne ne démarre pas.
+- Débit d'échantillonnage (mode pont) : 2 échantillons par symbole si la
+  carte le peut, sinon au moins débit symbole × (1 + roll-off) / 0,9 : le
+  signal doit rester dans 90 % de la bande (au bord, les filtres de
+  l'AD9361 coûtent ~3 dB, mesure dvbtx). Soit 1,5 éch./symbole en DVB-S,
+  1,28 en DVB-C, 1,33 à 1,17 en DVB-S2 (roll-off 0,20 à 0,05 ; roll-off
+  automatique : compté 0,35). Sur fichier (6/11/2026), aucune perte de
+  SNR à ces débits par rapport à 2 éch./symbole : DVB-S2 QPSK à 32APSK,
+  avec et sans pilotes, 18/18 ; DVB-C 16 à 256-QAM (le 256-QAM accroche un
+  peu plus lentement à 1,28 : ~20 paquets perdus à l'accord) ; DVB-S à 1,5.
+  Suréchantillonner davantage n'apporte rien : HackRF sur le DVB-C 602 MHz
+  (64-QAM, 6,875 Mbd, gain 70, 4 × 30 s alternés), 1,8-2,0 % de paquets en
+  erreur à 13,75 Msps (2 éch./symbole) contre 3,9-4,5 % à 20 Msps.
+- Débit symbole maximal : le démon annonce au frontend (`FE_GET_INFO`,
+  `DVBRX_IOC_LIMITS`) celui du roll-off le plus faible (0,05), ou, en
+  multicanal, celui de la bande utile de la capture. dvb-core refuse alors
+  aussitôt (`EINVAL`) un réglage DVB-S/S2/C au-delà, par exemple un
+  transpondeur de 22 000 kBd sur un HackRF ; tvheadend affiche « failed to
+  tune » et passe à un autre tuner libre (essai du 6/11/2026 : bascule sur
+  le bladeRF, flux en 2,9 s). Sans autre tuner, la chaîne ne démarre pas.
+  Entre les deux limites (un DVB-S à 15 Msym/s sur un HackRF), le réglage
+  passe le noyau mais le démon le refuse (« no usable sample rate ») :
+  l'application constate l'absence de signal.
 
 ### Plusieurs cartes en même temps
 
@@ -271,8 +288,9 @@ on y revient.
 - Tampons USB plus grands, indispensables dans une VM :
   `-u type=b200,num_recv_frames=512,recv_frame_size=16360` (pertes de 42 %
   à 0,5 % à 30,72 Msps).
-- En dessous de 1,5 échantillon/symbole (ex. 20,48 Msps pour 15,5 Msym/s)
-  le SNR s'effondre : rester à 30,72 Msps.
+- Le signal doit rester dans 90 % de la bande échantillonnée : à
+  20,48 Msps pour 15,5 Msym/s (roll-off 0,2, 91 %), avant l'égaliseur, le
+  SNR s'effondrait. La règle du mode pont en tient compte (voir « Cartes »).
 - Les interruptions du contrôleur USB (plusieurs milliers par seconde)
   ralentissent le thread qui partage leur CPU : `packaging/dvbrx-irq-pin`
   les met sur le dernier CPU et `dvbrxd-cpu.conf.example` (à copier dans

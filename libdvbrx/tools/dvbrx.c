@@ -947,6 +947,25 @@ struct chan_need {
     double want, min, occ;
 };
 
+/* Single carrier: the signal must stay within this fraction of the band.
+ * Nearer the edges the AD9361's analogue and decimation filters cut it
+ * (measured with dvbtx on a B210: ~3 dB of SNR lost at the edge); the
+ * receivers themselves work down to ~1.1 samples per symbol. */
+#define SC_FLAT 0.9
+/* Smallest roll-off: DVB-S2X 0.05 */
+#define ROLLOFF_MIN 0.05
+
+/* Roll-off to plan the sample rate with: the worst one when the
+ * application leaves it to the receiver (DVB-S2 ROLLOFF_AUTO). */
+static float rolloff_plan(const struct dvbrx_tune* t)
+{
+    if (t->delivery_system == SYS_DVBS2 && t->rolloff != ROLLOFF_35 && t->rolloff != ROLLOFF_25 &&
+        t->rolloff != ROLLOFF_20 && t->rolloff != ROLLOFF_15 && t->rolloff != ROLLOFF_10 &&
+        t->rolloff != ROLLOFF_5)
+        return 0.35f;
+    return rolloff_of(t);
+}
+
 static struct chan_need need_of(const struct dvbrx_tune* t)
 {
     struct chan_need n;
@@ -956,8 +975,10 @@ static struct chan_need need_of(const struct dvbrx_tune* t)
         n.min = elem;
         n.occ = 0.98 * bw; /* DVB-T2 extended carriers: 7.77 MHz in 8 MHz */
     } else {
+        /* DVB-S (roll-off 0.35): 1.5 samples per symbol; DVB-C 1.28;
+         * DVB-S2 1.33 (0.20) down to 1.17 (0.05) */
         n.want = 2.0 * t->symbol_rate;
-        n.min = 1.5 * t->symbol_rate;
+        n.min = t->symbol_rate * (1 + rolloff_plan(t)) / SC_FLAT;
         n.occ = t->symbol_rate * (1 + rolloff_of(t));
     }
     return n;
@@ -1967,9 +1988,11 @@ static void bridge_event(struct bridge* b)
     }
 }
 
-/* Highest symbol rate this adapter can receive: 1.5 samples per symbol at
- * the SDR's rate (single_rate()), or, on a shared capture, the usable band
- * (hub_fits()) with the smallest roll-off (0.05). 0: no limit (file). */
+/* Highest symbol rate this adapter can receive, with the smallest roll-off
+ * (DVB-S2X 0.05): the SDR's rate (single_rate(), need_of()), or, on a
+ * shared capture, its usable band (hub_fits()). dvb-core applies it to
+ * every delivery system: a DVB-S (0.35) just below it is still refused by
+ * the daemon. 0: no limit (file). */
 static uint32_t bridge_sr_max(const struct bridge* b)
 {
     const struct radio* r = b->radio;
@@ -1977,12 +2000,12 @@ static uint32_t bridge_sr_max(const struct bridge* b)
         return 0;
     double sr;
     if (b->hub)
-        sr = 2 * HUB_USABLE * b->hub->fs / 1.05;
+        sr = 2 * HUB_USABLE * b->hub->fs / (1 + ROLLOFF_MIN);
     else {
         double rate = b->max_rate;
         if (r->dev && r->info.rate_max > 0 && r->info.rate_max < rate)
             rate = r->info.rate_max;
-        sr = rate / 1.5;
+        sr = rate * SC_FLAT / (1 + ROLLOFF_MIN);
     }
     return sr > 0 && sr < 4e9 ? (uint32_t)sr : 0;
 }

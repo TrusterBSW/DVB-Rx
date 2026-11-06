@@ -242,7 +242,7 @@ static int brf_read(struct sdr* s, float* iq, int n, double timeout, double* t, 
 
 const struct sdr_driver sdr_bladerf = {
     .prefix = "bladerf",
-    .rate_max = 56e6,
+    .rate_max = 61.44e6,
     .multi = 1,
     .open = brf_open,
     .set_rate = brf_set_rate,

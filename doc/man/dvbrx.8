@@ -1,3 +1,4 @@
+'\" t
 .\" dvbrx(8) : récepteur DVB sur radio logicielle
 .TH DVBRX 8 2026-11-06 "dvbrx 0.1" "Manuel de dvbrx"
 .SH NOM
@@ -273,8 +274,7 @@ Aide.
 .SH CARTES
 .TP
 .B USRP B210 (UHD)
-Jusqu'à 56 Msps (61,44 avec une horloge maître de 61,44 MHz), 70 MHz à
-6 GHz. Avec horodatage : les échantillons perdus sur l'USB sont remplacés par
+Jusqu'à 61,44 Msps, 70 MHz à 6 GHz. Avec horodatage : les échantillons perdus sur l'USB sont remplacés par
 des zéros, et les récepteurs gardent leur synchronisation.
 .TP
 .B bladeRF 2.0 micro (libbladeRF)
@@ -289,16 +289,26 @@ qu'un B210 ; une seule chaîne de réception (pas de
 .BR \-n ,
 .BR \-m ).
 .PP
-Il faut au moins 1,5 échantillon par symbole : un HackRF reçoit au plus
-13,3 Msym/s, un B210 ou un bladeRF 37,3 Msym/s (56 Msps). Le démon annonce
-ce maximum dans les informations du frontend
+En mode pont, le débit d'échantillonnage vaut 2 échantillons par symbole si
+la carte le peut, et au moins débit symbole \(mu (1 + roll-off) / 0,9 : le
+signal doit rester dans 90 % de la bande. D'où les débits symbole maximaux :
+.TS
+l l l l.
+	DVB-S (0,35)	DVB-S2 (0,20 / 0,05)	DVB-C (0,15)
+B210, bladeRF	41	46 / 52,7	48 Msym/s
+HackRF	13,3	15 / 17,1	15,6 Msym/s
+.TE
+.PP
+Un roll-off DVB-S2 automatique est compté 0,35. Le démon annonce le maximum
+du roll-off 0,05 dans les informations du frontend
 .RB ( FE_GET_INFO ,
 .IR symbol_rate_max ;
 en multicanal, d'après la bande utile de la capture) : le noyau refuse
 aussitôt, avec
 .BR EINVAL ,
 un réglage DVB-S, S2 ou C au-delà, et tvheadend passe à un autre tuner
-libre.
+libre. Un réglage entre les deux limites est refusé par le démon (journal :
+« no usable sample rate ») : l'application constate l'absence de signal.
 .PP
 B210 et bladeRF (AD9361) : entre 138 et 250 MHz, les signaux à trois fois la
 fréquence accordée (414 à 750 MHz) se replient dans la bande ; un filtre

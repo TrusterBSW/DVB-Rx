@@ -24,6 +24,9 @@ OUT = os.path.join(W, "results.txt")
 quick = "--quick" in sys.argv
 which = [a for a in sys.argv[1:] if not a.startswith("--")] or ["dvbt", "dvbt2", "dvbc", "dvbs"]
 
+# Lowest rates: the bridge asks for (1 + roll-off) / 0.9 samples per symbol
+# (DVB-C 1.278, DVB-S 1.5): the signal within 90 % of the band.
+
 # SDR rate for a bandwidth: 61.44/N MHz just above 1.1 x the elementary rate
 SDR = {1.7: 61.44e6 / 32, 5: 61.44e6 / 10, 6: 61.44e6 / 8, 7: 61.44e6 / 7, 8: 61.44e6 / 6,
        10: 61.44e6 / 5}
@@ -145,7 +148,7 @@ def dvbt2():
 
 
 def dvbc():
-    for qam, (sr, sps) in itertools.product([16, 32, 64, 128, 256], [(6.9e6, 2.0), (6.875e6, 2.226), (5.0e6, 3.07)]):
+    for qam, (sr, sps) in itertools.product([16, 32, 64, 128, 256], [(6.9e6, 2.0), (6.875e6, 2.226), (5.0e6, 3.07), (6.9e6, 1.278)]):
         if quick and sps != 2.0:
             continue
         name = f"DVB-C {qam}-QAM {sr / 1e6:.3f} Msym/s, {sps} sps"
@@ -164,7 +167,7 @@ def dvbc():
 
 
 def dvbs():
-    for rate, sps in itertools.product(["1/2", "2/3", "3/4", "5/6", "7/8"], [2.0, 2.5]):
+    for rate, sps in itertools.product(["1/2", "2/3", "3/4", "5/6", "7/8"], [2.0, 2.5, 1.5]):
         name = f"DVB-S {rate} {sps} sps"
         sym = os.path.join(W, "sym.fc32")
         t0 = time.time()

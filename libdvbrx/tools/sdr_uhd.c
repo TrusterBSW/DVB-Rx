@@ -147,7 +147,7 @@ static int uhd_read(struct sdr* s, float* iq, int n, double timeout, double* t, 
 
 const struct sdr_driver sdr_uhd = {
     .prefix = "uhd",
-    .rate_max = 56e6,
+    .rate_max = 61.44e6,
     .multi = 1,
     .open = uhd_open,
     .set_rate = uhd_set_rate,
