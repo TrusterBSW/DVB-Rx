@@ -50,6 +50,7 @@ frontend, demux and dvr. tvheadend, VLC, Kaffeine or dvbv5-zap see it as a hardw
 - [Quick start](#quick-start)
 - [Command line](#command-line)
 - [A standard DVB card](#a-standard-dvb-card-devdvbadaptern)
+- [On Proxmox VE: host, container or VM](#on-proxmox-ve-host-container-or-vm)
 - [Source layout](#source-layout)
 - [Test bench without a signal](#test-bench-without-a-signal)
 - [Measurements](#cpu-optimisation-2026-11-03)
@@ -65,28 +66,21 @@ In one line:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/TrusterBSW/DVB-Rx/main/install.sh | sudo sh
+# --web: also dvbrx-web, the monitoring page; --adapters N: N adapters, one radio each
 curl -fsSL https://raw.githubusercontent.com/TrusterBSW/DVB-Rx/main/install.sh | sudo sh -s -- --web
 ```
 
-[`install.sh`](install.sh):
-- checks the system;
-- downloads the latest package from [`releases/`](releases/) and checks its
-  [`SHA256SUMS`](releases/SHA256SUMS);
-- installs the kernel headers (for the DKMS module) and the package with apt, which pulls in the
-  radio libraries;
-- lists the radios plugged in.
-
-It never starts a service. Its options:
-- `--web` also installs dvbrx-web, the monitoring page;
-- `--adapters N` creates N adapters (one radio each);
-- `--deb FILE` installs a package built locally (repeatable).
-
-Or by hand:
+It also installs the headers of the running kernel (the module is built by DKMS) and never starts a
+service. Or by hand:
 
 ```bash
 wget https://github.com/TrusterBSW/DVB-Rx/raw/main/releases/dvbrx_0.1.0_amd64.deb
 sudo apt install ./dvbrx_0.1.0_amd64.deb      # + linux-headers-… for the module (DKMS)
 ```
+
+The radio libraries (libuhd, libbladeRF, libhackrf) are loaded at run time, whatever their version
+(libuhd 4.3, 4.6, 4.8 from one release to the next). Each one is only *recommended*: a missing one
+disables that radio, nothing else.
 
 ## Quick start
 
@@ -402,6 +396,37 @@ back to it.
 First real test (HackRF on a direct cable, DVB-S2 8PSK 9/10 pilots,
 15.5 Msym/s at 1200 MHz, 10950 H multiplex through tvheadend): lock,
 SNR ~14 dB, 0 CRC errors, 6 services found by the scan.
+
+## On Proxmox VE: host, container or VM
+
+dvbrx has a kernel part (the module that creates `/dev/dvb`) and a user part (one `dvbrx` daemon per
+radio).
+
+- **On the host**: the simplest, and what is tested (Proxmox VE 9.2). The package builds the module
+  for the Proxmox kernel; its headers come with `proxmox-default-headers`, which also brings the
+  newest kernel, and the module is built for it too. tvheadend runs on the host or in a container.
+- **In an LXC container (CT)**: the module can only live on the host, since the kernel is shared.
+  Install the package on the host, then give the container the DVB devices, and the radio's USB
+  bus if the daemon runs inside too, in `/etc/pve/lxc/<ID>.conf`:
+
+  ```
+  lxc.cgroup2.devices.allow: c 212:* rwm
+  lxc.mount.entry: /dev/dvb dev/dvb none bind,optional,create=dir
+  lxc.cgroup2.devices.allow: c 10:* rwm
+  lxc.mount.entry: /dev/dvbrx0 dev/dvbrx0 none bind,optional,create=file
+  lxc.cgroup2.devices.allow: c 189:* rwm
+  lxc.mount.entry: /dev/bus/usb dev/bus/usb none bind,optional,create=dir
+  ```
+
+  - The simplest split: the daemons on the host and only tvheadend in the container; the first two
+    lines are then enough.
+  - `/dev/dvbrxN` is a misc device (major 10) whose minor number is chosen at load time: hence `10:*`.
+  - The whole USB bus, not one device: a B210 is enumerated again when UHD loads its firmware.
+- **In a VM with USB passthrough**: to avoid for a USRP at high rate. Measured: the B210 overflows
+  beyond about 15 Msps (2 to 3 times a second at 30.72 Msps), whatever the buffers. Pass the whole USB
+  controller (PCIe passthrough) instead; the module is then built inside the VM.
+
+The container setup is derived from the devices dvbrx uses, not yet tested.
 
 ## Source layout
 

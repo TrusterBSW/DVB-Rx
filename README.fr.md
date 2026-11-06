@@ -50,6 +50,7 @@ frontend, demux et dvr. tvheadend, VLC, Kaffeine ou dvbv5-zap le voient comme un
 - [Démarrage rapide](#démarrage-rapide)
 - [En ligne de commande](#en-ligne-de-commande)
 - [Carte DVB standard](#carte-dvb-standard--devdvbadaptern)
+- [Sur Proxmox VE : hôte, conteneur ou VM](#sur-proxmox-ve--hôte-conteneur-ou-vm)
 - [Organisation du code](#organisation-du-code)
 - [Banc de test sans signal](#banc-de-test-sans-signal)
 - [Mesures](#optimisation-cpu-3112026)
@@ -65,28 +66,21 @@ En une ligne :
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/TrusterBSW/DVB-Rx/main/install.sh | sudo sh
+# --web : aussi dvbrx-web, la page de supervision ; --adapters N : N adaptateurs, une radio chacun
 curl -fsSL https://raw.githubusercontent.com/TrusterBSW/DVB-Rx/main/install.sh | sudo sh -s -- --web
 ```
 
-[`install.sh`](install.sh) :
-- vérifie le système ;
-- télécharge le dernier paquet depuis [`releases/`](releases/) et vérifie son
-  [`SHA256SUMS`](releases/SHA256SUMS) ;
-- installe les en-têtes du noyau (pour le module DKMS) et le paquet avec apt, qui apporte les
-  bibliothèques des radios ;
-- liste les radios branchées.
-
-Il ne démarre aucun service. Ses options :
-- `--web` installe aussi dvbrx-web, la page de supervision ;
-- `--adapters N` crée N adaptateurs (une radio chacun) ;
-- `--deb FICHIER` installe un paquet construit localement (répétable).
-
-Ou à la main :
+Il installe aussi les en-têtes du noyau en cours (le module est construit par DKMS) et ne démarre
+aucun service. Ou à la main :
 
 ```bash
 wget https://github.com/TrusterBSW/DVB-Rx/raw/main/releases/dvbrx_0.1.0_amd64.deb
 sudo apt install ./dvbrx_0.1.0_amd64.deb      # + linux-headers-… pour le module (DKMS)
 ```
+
+Les bibliothèques des radios (libuhd, libbladeRF, libhackrf) sont chargées à l'exécution, quelle que
+soit leur version (libuhd 4.3, 4.6, 4.8 d'une version à l'autre). Chacune n'est que *recommandée* :
+une bibliothèque absente désactive cette radio, rien d'autre.
 
 ## Démarrage rapide
 
@@ -403,6 +397,41 @@ on y revient.
 Premier essai réel (HackRF en câble direct, DVB-S2 8PSK 9/10 pilotes,
 15,5 Msym/s à 1200 MHz, multiplex 10950 H via tvheadend) : verrouillage,
 SNR ~14 dB, 0 erreur CRC, 6 services trouvés au scan.
+
+## Sur Proxmox VE : hôte, conteneur ou VM
+
+dvbrx a une partie noyau (le module qui crée `/dev/dvb`) et une partie utilisateur (un démon
+`dvbrx` par radio).
+
+- **Sur l'hôte** : le plus simple, et ce qui est testé (Proxmox VE 9.2). Le paquet construit le
+  module pour le noyau Proxmox ; ses en-têtes viennent avec `proxmox-default-headers`, qui apporte
+  aussi le noyau le plus récent, et le module est construit pour lui aussi. tvheadend tourne sur
+  l'hôte ou dans un conteneur.
+- **Dans un conteneur LXC (CT)** : le module ne peut vivre que sur l'hôte, puisque le noyau est
+  partagé. Installer le paquet sur l'hôte, puis donner au conteneur les périphériques DVB, et le bus
+  USB de la radio si le démon tourne aussi dedans, dans `/etc/pve/lxc/<ID>.conf` :
+
+  ```
+  lxc.cgroup2.devices.allow: c 212:* rwm
+  lxc.mount.entry: /dev/dvb dev/dvb none bind,optional,create=dir
+  lxc.cgroup2.devices.allow: c 10:* rwm
+  lxc.mount.entry: /dev/dvbrx0 dev/dvbrx0 none bind,optional,create=file
+  lxc.cgroup2.devices.allow: c 189:* rwm
+  lxc.mount.entry: /dev/bus/usb dev/bus/usb none bind,optional,create=dir
+  ```
+
+  - Le partage le plus simple : les démons sur l'hôte et seulement tvheadend dans le conteneur ; les
+    deux premières lignes suffisent alors.
+  - `/dev/dvbrxN` est un périphérique misc (majeur 10) dont le mineur est choisi au chargement :
+    d'où `10:*`.
+  - Tout le bus USB, pas un seul périphérique : un B210 est énuméré de nouveau quand UHD charge son
+    firmware.
+- **Dans une VM avec redirection USB** : à éviter pour un USRP à haut débit. Mesuré : le B210 déborde
+  au-delà d'environ 15 Msps (2 à 3 fois par seconde à 30,72 Msps), quels que soient les tampons.
+  Donner plutôt toute la carte USB à la VM (passthrough PCIe) ; le module est alors construit dans la
+  VM.
+
+La configuration du conteneur est déduite des périphériques qu'utilise dvbrx, pas encore testée.
 
 ## Organisation du code
 
