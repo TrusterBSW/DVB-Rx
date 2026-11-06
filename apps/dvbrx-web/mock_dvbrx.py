@@ -363,7 +363,7 @@ class Mock:
         if self.monitor:
             self.monitor["last_status"] = now
         chans = []
-        radio = {"source": "uhd", "freq": 0, "rate": 0, "bandwidth": 0, "gain": 0, "agc": "level",
+        radio = {"source": "uhd", "model": "B210", "serial": "31A5B7C", "freq": 0, "rate": 0, "bandwidth": 0, "gain": 0, "agc": "level",
                  "level_dbfs": None, "input_dbm": None, "overflows": self.overflows, "filled": 0,
                  "lnb": {"present": self.has_lnb, "volt": self.lnb["volt"], "tone": self.lnb["tone"]}}
         a0 = {"adapter": 0, "state": "idle", "delsys": None, "freq": None, "symbol_rate": None,

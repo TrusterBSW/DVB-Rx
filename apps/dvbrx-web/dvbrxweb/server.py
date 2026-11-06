@@ -30,6 +30,17 @@ class App:
                                  "scanner": Scanner(cfg, client, key), "monitor": None})
         self.lock = threading.Lock()
 
+    def cards(self):
+        """Carte (modèle, numéro de série) derrière chaque socket, pour le sélecteur."""
+        out = []
+        for sk in self.sockets:
+            try:
+                r = sk["client"].request({"cmd": "status"}, timeout=1.0).get("radio") or {}
+                out.append({"model": r.get("model") or "", "serial": r.get("serial") or ""})
+            except (DvbrxError, OSError, ValueError):
+                out.append({"model": "", "serial": ""})
+        return out
+
     def sock(self, q):
         try:
             i = int(q.get("s", 0))
@@ -161,7 +172,8 @@ class Handler(BaseHTTPRequestHandler):
             if not u.path.startswith("/api/"):
                 return self.serve_static(u.path)
             if u.path == "/api/config":
-                return self.send_json(dict(app.cfg.public(), ok=True, version=VERSION))
+                return self.send_json(dict(app.cfg.public(), ok=True, version=VERSION,
+                                           cards=app.cards()))
             sk = app.sock(q)
             if u.path == "/api/status":
                 st = sk["client"].status()

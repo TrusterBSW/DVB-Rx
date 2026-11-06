@@ -194,12 +194,20 @@ function kv(rows) {
   return rows.filter((r) => r).map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join('');
 }
 
+/* « Salon — B210 31A5B7C » : le nom du socket et la carte qui le sert */
+function sockLabel(name, c) {
+  const card = c ? [c.model, c.serial].filter(Boolean).join(' ') : '';
+  return card ? `${name} — ${card}` : name;
+}
+
 function renderStatus(st) {
   const r = st.radio || {};
   const offNote = S.cfg && S.cfg.input_offset_db !== null && S.cfg.input_offset_db !== undefined
     ? ` (offset web ${num(S.cfg.input_offset_db, 1)} dB)` : '';
   $('#radioKv').innerHTML = kv([
     ['Source', esc(r.source ?? '—')],
+    ['Carte', esc(r.model || '—')],
+    ['N° de série', r.serial ? `<code>${esc(r.serial)}</code>` : '—'],
     ['Fréquence', mhz(r.freq)],
     ['Filtre analogique', isNum(r.bandwidth) && r.bandwidth > 0 ? mhz(r.bandwidth, 2) : 'ouvert / —'],
     ['Échantillonnage', isNum(r.rate) ? `${num(r.rate / 1e6, 3)} MS/s` : '—'],
@@ -213,6 +221,8 @@ function renderStatus(st) {
     ['LNB', esc(lnbText(r.lnb, r))],
   ]);
   $('#radioUpd').textContent = 'mis à jour ' + new Date().toLocaleTimeString('fr-FR');
+  const opt = $('#sock').selectedOptions[0];
+  if (opt && (r.model || r.serial)) opt.textContent = sockLabel(opt.dataset.name, r);
 
   const cards = (st.channels || []).map((ch) => {
     const ds = String(ch.delsys || '');
@@ -1115,7 +1125,8 @@ async function init() {
     return;
   }
   const socks = S.cfg.sockets || [];
-  $('#sock').innerHTML = socks.map((s) => `<option value="${s.id}" title="${esc(s.path)}">${esc(s.name)}</option>`).join('');
+  const cards = S.cfg.cards || [];
+  $('#sock').innerHTML = socks.map((s, i) => `<option value="${s.id}" title="${esc(s.path)}" data-name="${esc(s.name)}">${esc(sockLabel(s.name, cards[i]))}</option>`).join('');
   $('#sockSel').hidden = socks.length < 2;
   $('#cableStart').value = Math.round(S.cfg.cable.start / 1e6);
   $('#cableStop').value = Math.round(S.cfg.cable.stop / 1e6);
