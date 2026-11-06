@@ -1,0 +1,455 @@
+'\" t
+.\" dvbrx(8): DVB receiver on a software radio
+.TH DVBRX 8 2026-11-06 "dvbrx 0.1" "dvbrx manual"
+.SH NAME
+dvbrx \- real-time DVB-S/S2/S2X/C/T/T2 receiver on a software radio, exposed as /dev/dvb
+.SH SYNOPSIS
+.SY dvbrx
+.RB ( \-u
+.RI [ DRIVER :] ARGS
+.B \-f
+.I HZ
+|
+.B \-F
+.IR FILE )
+.B \-s
+.I SYM/S
+.RI [ options ]
+.YS
+.SY dvbrx
+.RB ( \-u
+.RI [ DRIVER :] ARGS
+|
+.B \-F
+.IR FILE )
+.B \-S
+.I HZ
+.B \-m
+.IR CHANNEL ...\&
+.RB [ \-f
+.IR HZ ]
+.YS
+.SY dvbrx
+.B \-d
+.I N
+.RB [ \-n
+.I COUNT
+.RB [ \-W
+.IR HZ ]]
+.RB ( \-u
+.RI [ DRIVER :] ARGS
+|
+.B \-F
+.IR FILE )
+.RI [ options ]
+.YS
+.SY dvbrx
+.BR \-h " | " \-\-help " | " \-\-version
+.YS
+.SH DESCRIPTION
+.B dvbrx
+demodulates and decodes in real time the DVB-S, DVB-S2 (and S2X), DVB-C,
+DVB-T and DVB-T2 standards from a software radio (USRP B2xx through UHD,
+bladeRF, HackRF) or from an IQ file, and produces the MPEG-TS transport
+stream.
+.PP
+It has three modes:
+.TP
+.B standalone
+one channel, tuned on the command line; the TS goes to standard output,
+to a file or over UDP
+.RB ( \-o ).
+.TP
+.B multichannel
+several multiplexes extracted from one wideband capture
+.RB ( \-m
+repeated), each to its own output.
+.TP
+.B /dev/dvb bridge
+.RB ( \-d
+.IR N )
+with the
+.B dvbrx
+kernel module, the daemon serves
+.BI /dev/dvb/adapter N
+like an ordinary DVB card: applications (tvheadend, dvbv5-zap, VLC,
+Kaffeine...) tune the frontend, dvbrx receives these tuning requests through
+.BI /dev/dvbrx N\c
+, tunes the radio and sends the TS back into the demux. This is the mode of
+the
+.BR dvbrxd@ \fIN\fR
+service.
+.SH OPTIONS
+.SS Radio
+.TP
+.BR \-u " [\fIDRIVER\fR:]\fIARGS\fR"
+Radio and device to open.
+.I DRIVER
+is
+.B uhd
+(default; UHD
+.IR ARGS ,
+for example
+.BR type=b200,serial=31A5B7C ),
+.B bladerf
+(libbladeRF device string, for example
+.BR *:serial=0a0896e9813f43d29e2ff2278014dfb1 )
+or
+.B hackrf
+(serial number, or its end, as shown by
+.BR hackrf_info ).
+Empty
+.IR ARGS :
+the first device found. With several devices, always give the serial
+number.
+.TP
+.BI \-F " FILE"
+IQ file (interleaved 32-bit floating-point complex samples) instead of a
+radio. In bridge mode, it is replayed in a loop at the real rate and the
+frequency is ignored.
+.TP
+.BR \-G " \fIDB\fR | " auto [: \fIMAX\fR]
+Receive gain (default 40 dB).
+.B auto
+first sets it for a mean level of \-24 dBFS (and lowers it at once if the
+ADC clips), then, once the receiver is locked, moves it in 3 dB steps
+towards the gain that gives the best SNR;
+.I MAX
+caps it. Recommended on cable and antenna.
+.TP
+.BI \-A " INPUT"
+Input of the device: UHD
+.B TX/RX
+or
+.BR RX2 ,
+bladeRF
+.B RX1
+(default) or
+.BR RX2 .
+The HackRF has only one; its antenna power always stays off.
+.TP
+.BI \-B " HZ"
+Width of the analogue filter (default: occupied width of the channel
++ 15%, or the whole capture in multichannel mode; 0: UHD's choice).
+.TP
+.BI \-M " HZ"
+Master clock (UHD).
+.TP
+.BI \-S " HZ"
+Sample rate. Standalone mode: default 2 samples per symbol, 1.12 times the
+elementary rate in OFDM; multichannel: rate of the capture. Bridge mode:
+maximum rate (default: that of the radio).
+.SS Channel (standalone mode)
+.TP
+.BI \-f " HZ"
+Centre frequency; on satellite, the intermediate frequency after the LNB.
+.TP
+.BI \-s " SYM/S"
+Symbol rate (DVB-S, S2, C).
+.TP
+.BI \-r " ROLLOFF"
+Roll-off (default 0.2).
+.TP
+.BI \-g " GOLD"
+PL scrambling gold code (default 0);
+.BI r N
+: root code.
+.TP
+.BI \-i " ISI"
+DVB-S2 input stream (default: all; over UDP, each on PORT + ISI); in
+DVB-T2, the PLP.
+.TP
+.BI \-l " RATE"
+DVB-S (first generation):
+.BR auto ,
+.BR 1/2 ,
+.BR 2/3 ,
+.BR 3/4 ,
+.B 5/6
+or
+.BR 7/8 .
+.TP
+.BI \-c " QAM"
+DVB-C:
+.BR auto ,
+16, 32, 64, 128 or 256 (roll-off 0.15).
+.TP
+.BI \-T " MHZ"
+DVB-T, channel width (5, 6, 7 or 8; no
+.BR \-s ).
+.TP
+.BI \-2 " MHZ"
+DVB-T2, channel width;
+.B \-i
+selects the PLP.
+.TP
+.BI \-x " HZ"
+Channel offset by
+.I HZ
+in a capture at
+.BR \-S .
+.TP
+.BI \-D " SYMBOLS"
+Half-length of the matched filter (default: depends on the roll-off).
+.TP
+.BI \-o " DEST"
+TS output:
+.B \-
+(standard output, default), a file, or
+.BI udp:// HOST : PORT\c
+\&.
+.TP
+.B \-R
+File: read at the real rate, in a loop.
+.SS Multichannel
+.TP
+.BI \-m " CHANNEL"
+One multiplex of the capture (repeatable option). Keys separated by
+commas:
+.B f
+(Hz),
+.B sys
+.RB ( s ,
+.BR s2 ,
+.BR c ,
+.BR t ,
+.BR t2 ),
+.B sr
+(sym/s),
+.B bw
+(MHz),
+.BR ro ,
+.BR qam ,
+.B fec
+(DVB-S),
+.BR isi / plp ,
+.BR gold ,
+.B o
+(output). For example
+.BR "\-m f=646e6,sys=t2,bw=8,o=udp://127.0.0.1:1234" .
+.B \-f
+sets the centre of the capture (default: middle of the channels).
+.SS /dev/dvb bridge mode
+.TP
+.BI \-d " N"
+Serves
+.BI /dev/dvbrx N\c
+, hence
+.BI /dev/dvb/adapter N\c
+\&.
+.TP
+.BI \-n " COUNT"
+Serves adapters
+.IR N ", " N +1...
+from a single wideband capture (B210, bladeRF); each adapter has its own
+receiver.
+.TP
+.BI \-W " HZ"
+Rate of this capture (default 30.72e6).
+.TP
+.BI \-L " LNB"
+LNB controller (13/18 V, 22 kHz, DiSEqC):
+.B none
+(default),
+.BI serial: DEVICE
+or
+.BI udp: HOST : PORT\c
+\&.
+.TP
+.BI \-C " PATH"
+Control socket for
+.BR dvbrx\-web (8)
+(default
+.BI /run/dvbrx/dvbrx\- N .sock\c
+;
+.B \(dq\(dq
+: none).
+.TP
+.BI \-P " DB"
+Input power estimate: dBm at 0 dBFS and 0 dB of gain (default 0).
+.TP
+.BI \-U " MB/S"
+USB bandwidth shared by the radios on the same bus (default: 350 on USB 3,
+42 on USB 2; 0: no sharing), see
+.BR "USB BANDWIDTH" .
+.SS Common
+.TP
+.BI \-t " N"
+LDPC decoding threads (default 2).
+.TP
+.BR \-h ", " \-\-help
+Help.
+.TP
+.B \-\-version
+The version.
+.SH RADIOS
+.TP
+.B USRP B210 (UHD)
+Up to 61.44 Msps, 70 MHz to 6 GHz. With timestamps: samples lost on the USB are replaced by
+zeros, and the receivers keep their synchronisation.
+.TP
+.B bladeRF 2.0 micro (libbladeRF)
+Same performance as the B210 (same AD9361). The FPGA must match
+libbladeRF (FPGA 0.15.3 with libbladeRF 2024.05; with a newer FPGA, the
+stream delivers only a quarter of the samples); dvbrx shows its version at
+startup.
+.TP
+.B HackRF One (libhackrf)
+20 Msps at most, 8-bit samples, clearly less sensitive than a B210 (6 to
+7 dB measured behind a hub); a single receive chain (no
+.BR \-n ,
+.BR \-m ).
+It is sensitive to its USB power supply: behind an unpowered hub, the
+phase of its oscillator can jump periodically (errors in DVB-S and DVB-C
+whatever the SNR); plug it in directly or into a powered hub.
+.PP
+In bridge mode, the sample rate is 2 samples per symbol if the radio can do
+it, and at least symbol rate \(mu (1 + roll-off) / 0.9: the signal must stay
+within 90% of the band. Hence the maximum symbol rates:
+.TS
+l l l l.
+	DVB-S (0.35)	DVB-S2 (0.20 / 0.05)	DVB-C (0.15)
+B210, bladeRF	41	46 / 52.7	48 Msym/s
+HackRF	13.3	15 / 17.1	15.6 Msym/s
+.TE
+.PP
+An automatic DVB-S2 roll-off is counted as 0.35. The daemon reports the
+maximum for roll-off 0.05 in the frontend information
+.RB ( FE_GET_INFO ,
+.IR symbol_rate_max ;
+in multichannel mode, from the usable band of the capture): the kernel
+refuses at once, with
+.BR EINVAL ,
+a DVB-S, S2 or C tuning above it, and tvheadend moves to another free
+tuner. A tuning between the two limits is refused by the daemon (log:
+\(lqno usable sample rate\(rq): the application sees no signal.
+.PP
+If the radio no longer answers (unplugged), the daemon stops (exit code 3)
+instead of insisting; systemd restarts it and it reopens the radio when it
+comes back. A radio missing at startup is opened at the first tuning.
+.PP
+B210 and bladeRF (AD9361): between 138 and 250 MHz, signals at three times
+the tuned frequency (414 to 750 MHz) fold back into the band; a low-pass
+filter around 300 MHz in front of the input is needed for this band.
+.SH FRONTEND AND TVHEADEND
+Each adapter has a DVB-S/S2, a DVB-C and a DVB-T/T2 frontend (one at a
+time). At startup, the daemon opens the radio and gives the frontend its
+name, with the model and the serial number:
+.RS
+.EX
+dvbrx B210 31A5B7C
+dvbrx bladeRF 2.0 xA4 0a0896e9813f43d29e2ff2278014dfb1
+dvbrx HackRF One 334c64dc39395367
+.EE
+.RE
+.PP
+tvheadend reads this name when it discovers the adapter and derives its
+configuration identifier from it: each radio keeps its own. A new radio
+comes with its frontends disabled: enable them and assign them the networks
+(Configuration > DVB Inputs > TV adapters). The service is
+.B Type=notify
+and ordered before tvheadend, so that the name is in place when tvheadend
+starts; a radio swapped while tvheadend is running only appears after
+tvheadend restarts.
+.PP
+Tick
+.B Power save
+on the dvbrx frontends: the radio is released a few seconds after viewing
+ends. With several radios, a higher
+.B priority
+on the most sensitive one makes it chosen first.
+.SH SEVERAL RADIOS
+One daemon per radio, each on its own adapter:
+.RS
+.EX
+# /etc/modprobe.d/dvbrx.conf
+options dvbrx adapters=2
+# /etc/dvbrxd/0.conf
+DVBRXD_ARGS="\-u bladerf:*:serial=0a0896e9... \-G auto \-t 3"
+# /etc/dvbrxd/1.conf
+DVBRXD_ARGS="\-u hackrf:334c64dc39395367 \-G auto \-t 2"
+
+systemctl enable \-\-now dvbrxd@0 dvbrxd@1
+.EE
+.RE
+.PP
+Both receive different multiplexes at the same time; each radio is
+designated by its serial number, the plug-in order does not matter. The
+cost is that of two receivers (DVB-T2 or DVB-S2: one to two cores each).
+.SH USB BANDWIDTH
+USB is the bottleneck: an AD9361 radio sends 4 bytes per sample
+(246 MB/s at 61.44 Msps), a HackRF 2 (40 MB/s at 20 Msps); a USB 3 bus
+carries about 350 MB/s of payload, a USB 2 bus about 42. Different ports
+do not mean different controllers: all the ports of a controller, and those
+of the hubs plugged into it, share its bandwidth; an xHCI controller has a
+USB 2 bus and a USB 3 bus on separate lines
+.RB ( "lsusb \-t" ).
+.PP
+The daemons on the same bus share its bandwidth
+.RI ( /run/dvbrx/usb\- N ).
+On tuning, a daemon takes its full rate (2 samples per symbol) if it is
+alone, otherwise what the others leave, without going below the minimum of
+the channel; if it lacks room, the others step down through a new tuning
+(about 1 s without TS for them) and keep that rate until their next tuning.
+With no room after 2.5 s, it takes its minimum anyway.
+.B \-U
+.I MB/S
+changes the budget of the bus (350 on USB 3, 42 on USB 2 by default; same
+value for all the radios of a bus),
+.B \-U 0
+disables sharing. The captures of
+.BR dvbrx\-web (8)
+scans are not counted.
+.PP
+Stepping down costs SNR on a real signal (cable, neighbouring multiplexes:
+2.4 dB in DVB-C 64-QAM at 1.28 samples per symbol): the daemon only does it
+if the radio or the bus requires it.
+.SH FILES
+.TP
+.BI /dev/dvbrx N
+Control device of the module, opened by the daemon (only one at a time).
+.TP
+.BI /dev/dvb/adapter N
+The DVB adapter seen by applications.
+.TP
+.BI /etc/dvbrxd/ N .conf
+Options of the
+.BR dvbrxd@ \fIN\fR
+service
+.RB ( DVBRXD_ARGS ).
+.TP
+.B /etc/modprobe.d/dvbrx.conf
+Number of adapters of the module
+.RB ( "options dvbrx adapters=" \fIN\fR,
+1 to 8).
+.TP
+.BI /run/dvbrx/usb\- N
+USB bandwidth used by daemon
+.IR N ,
+read by the other daemons on the same bus.
+.TP
+.BI /run/dvbrx/dvbrx\- N .sock
+Control socket (JSON per line: status, constellation, probe, monitor,
+capture, lnb), see
+.IR doc/dvbrx\-web\-api.md .
+.SH EXAMPLES
+.EX
+# satellite: IF 1210 MHz, 27.5 Msym/s, to mpv
+dvbrx \-u type=b200 \-f 1210e6 \-s 27.5e6 \-o udp://127.0.0.1:1234
+# DVB-T2 8 MHz at 586 MHz on a bladeRF, PLP 0
+dvbrx \-u bladerf: \-f 586e6 \-2 8 \-i 0 \-G auto \-o t2.ts
+# two multiplexes from a 30.72 Msps capture
+dvbrx \-u type=b200 \-G auto \-S 30.72e6 \e
+    \-m f=646e6,sys=t2,bw=8,o=udp://127.0.0.1:1234 \e
+    \-m f=655e6,sys=c,sr=6.9e6,qam=64,o=udp://127.0.0.1:1235
+# /dev/dvb bridge by hand, with the LNB controller
+sudo dvbrx \-d 0 \-u type=b200 \-G auto \-L serial:/dev/ttyACM0
+.EE
+.SH SEE ALSO
+.BR dvbrx\-web (8),
+.BR tvheadend (1),
+.BR dvbv5\-zap (1),
+.BR hackrf_info (1),
+.BR uhd_find_devices (1)
+.PP
+/usr/share/doc/dvbrx/README.md, dvbrx-web-api.md, lnb-protocol.md

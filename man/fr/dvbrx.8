@@ -44,7 +44,7 @@ dvbrx \- récepteur DVB-S/S2/S2X/C/T/T2 temps réel sur radio logicielle, expos�
 .RI [ options ]
 .YS
 .SY dvbrx
-.BR \-h " | " \-\-help
+.BR \-h " | " \-\-help " | " \-\-version
 .YS
 .SH DESCRIPTION
 .B dvbrx
@@ -276,6 +276,9 @@ Threads de décodage LDPC (défaut 2).
 .TP
 .BR \-h ", " \-\-help
 Aide.
+.TP
+.B \-\-version
+La version.
 .SH CARTES
 .TP
 .B USRP B210 (UHD)
@@ -447,4 +450,4 @@ sudo dvbrx \-d 0 \-u type=b200 \-G auto \-L serial:/dev/ttyACM0
 .BR hackrf_info (1),
 .BR uhd_find_devices (1)
 .PP
-README.md, doc/dvbrx-web-api.md, doc/lnb-protocol.md
+/usr/share/doc/dvbrx/README.fr.md, dvbrx-web-api.md, lnb-protocol.md

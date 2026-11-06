@@ -1,88 +1,106 @@
-# dvbrx
+<h1 align="center">dvbrx</h1>
 
-Réception DVB temps réel sur radio logicielle (USRP B210, bladeRF 2.0,
-HackRF One), exposée comme un adaptateur standard `/dev/dvb` : DVB-S,
-DVB-S2, DVB-S2X, DVB-C, DVB-T et DVB-T2. Contrôle LNB (13/18 V, 22 kHz,
-DiSEqC) déporté sur un ESP32. Supervision, scan et alignement par une page
-web (`apps/dvbrx-web`).
+<p align="center">
+  <b>Une radio logicielle vue comme une vraie carte TV.</b><br>
+  La télévision numérique reçue en temps réel par un USRP B210, un bladeRF ou un HackRF, et servie
+  par <code>/dev/dvb</code> à tvheadend, VLC ou dvbv5.
+</p>
 
-Documentation : `dvbrx --help`, `man dvbrx` et `man dvbrx-web` (sources
-dans `doc/man/`, installées par `packaging/install.sh`), ce README,
-`doc/dvbrx-web-api.md` (socket de contrôle), `doc/lnb-protocol.md`.
+<p align="center">
+  <a href="README.md">English version</a> ·
+  <a href="#installation">Installation</a> ·
+  <a href="#démarrage-rapide">Démarrage rapide</a> ·
+  <a href="#documentation">Documentation</a>
+</p>
 
-## Mise en place
+<p align="center">
+  <img alt="licence" src="https://img.shields.io/badge/licence-GPL--3.0--or--later-blue">
+  <img alt="plateformes" src="https://img.shields.io/badge/plateformes-Debian%2012%20%7C%2013%20%7C%20Ubuntu%2024.04%20%7C%20Proxmox%20VE-informational">
+  <img alt="normes" src="https://img.shields.io/badge/DVB-S%20%7C%20S2%20%7C%20S2X%20%7C%20C%20%7C%20T%20%7C%20T2-success">
+  <img alt="radios" src="https://img.shields.io/badge/radios-USRP%20B210%20%7C%20bladeRF%20%7C%20HackRF-orange">
+</p>
 
-    git clone --recursive https://github.com/igorauad/gr-dvbs2rx third_party/gr-dvbs2rx
-    cmake -S third_party/gr-dvbs2rx -B third_party/gr-dvbs2rx/build \
-          -DCMAKE_INSTALL_PREFIX=$PWD/prefix -DCMAKE_BUILD_TYPE=Release \
-          -DNATIVE_OPTIMIZATIONS=ON -DCMAKE_POLICY_VERSION_MINIMUM=3.5
-    cmake --build third_party/gr-dvbs2rx/build -j8
-    cmake --install third_party/gr-dvbs2rx/build
-    . ./env.sh
+---
 
-    make -C libdvbrx                                  # bibliothèque C + fe_bench
-    cmake -S gr-dvbrx -B gr-dvbrx/build && cmake --build gr-dvbrx/build   # bloc GNU Radio
+dvbrx décode en temps réel la télévision numérique reçue par une radio logicielle et l'expose par
+l'API DVB standard de Linux (DVBv5) : un module noyau crée un `/dev/dvb/adapterN` ordinaire, avec
+frontend, demux et dvr. tvheadend, VLC, Kaffeine ou dvbv5-zap le voient comme un tuner matériel.
 
-Dépendances système : gnuradio (+ gnuradio-dev sur Debian), libuhd, FFTW
-(libfftw3-dev, simple précision), pybind11, tsduck, ffmpeg. Pour `dvbrx`
-seul : FFTW et, selon les cartes voulues, libuhd-dev, libbladerf-dev,
-libhackrf-dev (chaque pilote est compilé si son en-tête est présent).
+- **Toutes les normes** : DVB-S, DVB-S2 et DVB-S2X jusqu'au 256APSK (multistream, roll-off 0,05 à
+  0,35), DVB-C 16 à 256-QAM, DVB-T 2K/8K (hiérarchique compris), DVB-T2 1K à 32K (PLP,
+  constellations tournées).
+- **Des démodulateurs en C** : LDPC vectorisé AVX2 / AVX-512, égaliseur sur pilotes, Viterbi,
+  Reed-Solomon ; un DVB-S2 à 52 Msym/s est reçu en direct sur un B210.
+- **Une vraie carte DVB** : frontend nommé d'après la radio et son numéro de série, contrôle du LNB
+  (13/18 V, 22 kHz, DiSEqC) par un ESP32, un réglage impossible refusé aussitôt pour que tvheadend
+  passe à un autre tuner.
+- **Plusieurs radios à la fois**, ou plusieurs multiplex d'une seule capture large bande ; la bande
+  USB est partagée entre les radios d'un même bus.
+- **dvbrx-web** : une page de supervision, scan du câble et du satellite, constellation, alignement
+  d'une parabole ou d'une antenne TNT, export pour tvheadend.
+- **Prêt à l'emploi** : paquets Debian, module DKMS, service systemd par adaptateur.
 
-## Organisation
+> [!WARNING]
+> **Tension LNB.** Avec un contrôleur de LNB, le câble porte 13 ou 18 V : ne le reliez qu'à une
+> entrée de radio protégée (té de polarisation, bloqueur de continu). dvbrx ne fait que recevoir.
 
-- `libdvbrx/` : récepteurs DVB complets en C (GPL-3.0-or-later, une partie
-  étant portée de gr-dvbs2rx) :
-  - `frontend.c` : correction de fréquence (AFC), filtre adapté, synchro
-    rythme symbole (Gardner + interpolation cubique), AGC ;
-  - `pl.c` : synchro trame PL, décodage PLS, désembrouillage, récupération de
-    porteuse (pilotes + interpolation, ou PLL décisionnelle sans pilotes) ;
-  - `demap.c` : démappeur max-log + désentrelacement, toutes les MODCOD
-    DVB-S2 et DVB-S2X jusqu'au 256APSK (hors VL-SNR) ;
-  - `ldpc.c` : LDPC layered min-sum, 32 trames en AVX2 / 64 en AVX-512 ;
-  - `bch.c`, `bb.c` : BCH, désembrouillage BB, reconstruction TS par ISI ;
-  - `dvbs.c` : DVB-S (1re génération) : porteuse, détection automatique du
-    rendement / ambiguïté de phase / poinçonnage, Viterbi K=7, désentrelaceur,
-    Reed-Solomon (204,188), dispersion d'énergie ;
-  - `dvbc.c` : DVB-C (EN 300 429) : fréquence par la raie de puissance 4
-    (FFT), égaliseur CMA puis décisionnel, PLL, décodage différentiel des
-    quadrants, 16 à 256-QAM, détection automatique de la constellation ;
-  - `dvbt.c` : DVB-T (EN 300 744) : détection mode 2K/8K et intervalle de
-    garde sur le préfixe cyclique, fréquence fractionnaire et entière,
-    estimation de canal sur les pilotes dispersés (interpolation à pente de
-    phase compensée), phase commune et horloge d'échantillonnage sur les
-    pilotes continus, TPS, désentrelacements symbole et bit, démapping
-    pondéré par |H|², Viterbi ; flux HP en modulation hiérarchique ;
-  - `dvbt2.c` : DVB-T2 (EN 302 755, profil de base, SISO) : P1 (S1/S2,
-    fréquence), intervalle de garde, symboles P2 et L1-pre / L1-post (LDPC
-    16K raccourci et poinçonné), toutes tailles FFT 1K à 32K, mode étendu,
-    motifs PP1 à PP8, symbole de clôture, désentrelacements fréquentiel,
-    temporel et de cellules, constellations tournées (retard Q cyclique),
-    LDPC 16K/64K (dont les codes propres au T2 : 2/3 normal, 3/5 court),
-    BCH, couche BB (décodage FEC sur 2 threads dédiés, trames décodées en
-    parallèle et restituées dans l'ordre) ; un PLP (`-i`) ; tables générées par
-    `gen/gen_t2_tables.py` depuis gr-dtv ;
-  - `chan.c` : canaliseur multicanal (banc de filtres par convolution
-    rapide, overlap-save : une FFT de la capture partagée par tous les
-    canaux, puis par canal une petite IFFT à son propre débit ; l'inverse du
-    banc de synthèse de dvbtx) ;
-  - `resamp.c` : rééchantillonneur polyphase (débit SDR → débit OFDM,
-    rapport suivant l'horloge de l'émetteur) ;
-  - `conv.c` (Viterbi, poinçonnage) et `outer.c` (synchro paquet,
-    désentrelaceur, RS, dispersion d'énergie) : couches communes DVB-S,
-    DVB-C et DVB-T ; `fft.c` : FFT (OFDM) ;
-  - `rx.c` (mono-thread) et `rxmt.c` (pipeline multi-thread) ;
-  - `gen/` : générateurs des tables (FEC, LDPC, et constellations /
-    entrelacement / codes PLS mesurés sur l'émetteur gr-dtv, sources dans
-    `third_party/gnuradio-dtv`) ;
-  - `tools/dvbrx.c` : le récepteur (démon `dvbrxd@N` en mode pont) ;
-    `tools/sdr_uhd.c`, `sdr_bladerf.c`, `sdr_hackrf.c` : les pilotes de
-    cartes (USRP par l'API C d'UHD, libbladeRF, libhackrf), ou fichier IQ.
-- `gr-dvbrx/`, `apps/dvbrx-dvbs2-rx` : étape intermédiaire (front-end C dans
-  la chaîne GNU Radio gr-dvbs2rx).
-- `tests/` : vecteurs de référence (émetteur gr-dtv) et tests par étage.
-- `bench/` : mesures de débit et de MER.
+## Sommaire
 
-## Regarder la TV
+- [Installation](#installation)
+- [Démarrage rapide](#démarrage-rapide)
+- [En ligne de commande](#en-ligne-de-commande)
+- [Carte DVB standard](#carte-dvb-standard--devdvbadaptern)
+- [Organisation du code](#organisation-du-code)
+- [Banc de test sans signal](#banc-de-test-sans-signal)
+- [Mesures](#optimisation-cpu-3112026)
+- [Pistes futures](#pistes-futures)
+- [Compiler depuis les sources](#compiler-depuis-les-sources)
+- [Documentation](#documentation)
+- [Licence](#licence)
+
+## Installation
+
+Un seul paquet pour Debian 12 et 13, Proxmox VE 8 et 9 et Ubuntu 24.04 et plus récents (amd64).
+En une ligne :
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/TrusterBSW/DVB-Rx/main/install.sh | sudo sh
+curl -fsSL https://raw.githubusercontent.com/TrusterBSW/DVB-Rx/main/install.sh | sudo sh -s -- --web
+```
+
+[`install.sh`](install.sh) :
+- vérifie le système ;
+- télécharge le dernier paquet depuis [`releases/`](releases/) et vérifie son
+  [`SHA256SUMS`](releases/SHA256SUMS) ;
+- installe les en-têtes du noyau (pour le module DKMS) et le paquet avec apt, qui apporte les
+  bibliothèques des radios ;
+- liste les radios branchées.
+
+Il ne démarre aucun service. Ses options :
+- `--web` installe aussi dvbrx-web, la page de supervision ;
+- `--adapters N` crée N adaptateurs (une radio chacun) ;
+- `--deb FICHIER` installe un paquet construit localement (répétable).
+
+Ou à la main :
+
+```bash
+wget https://github.com/TrusterBSW/DVB-Rx/raw/main/releases/dvbrx_0.1.0_amd64.deb
+sudo apt install ./dvbrx_0.1.0_amd64.deb      # + linux-headers-… pour le module (DKMS)
+```
+
+## Démarrage rapide
+
+```bash
+sudoedit /etc/dvbrxd/0.conf          # la radio de l'adaptateur 0 : DVBRXD_ARGS="-u type=b200 -G auto"
+sudo systemctl enable --now dvbrxd@0 # /dev/dvb/adapter0, au démarrage aussi
+journalctl -u dvbrxd@0 -f            # « frontend named "dvbrx B210 31A5B7C" »
+dvbv5-zap -a 0 -c chaines.conf "France 2"      # ou tvheadend : Configuration > DVB Inputs
+```
+
+Plusieurs radios : `/etc/modprobe.d/dvbrx.conf` (`options dvbrx adapters=2`), un fichier
+`/etc/dvbrxd/N.conf` par radio, désignée par son numéro de série (voir [Cartes](#cartes)).
+
+## En ligne de commande
 
     make -C libdvbrx
     # B210, fréquence intermédiaire L-band (après LNB), 27,5 Msym/s :
@@ -327,15 +345,18 @@ est acceptée.
   la VM un contrôleur USB en passthrough PCIe, ou faire tourner dvbrx
   sur la machine hôte.
 
-### Installation durable (testée sur Debian 13)
+### Installation depuis les sources (testée sur Debian 13)
 
-    sudo packaging/install.sh 1     # module DKMS, udev, utilisateur dvbrxd, service
-    sudoedit /etc/dvbrxd/0.conf     # DVBRXD_ARGS="-u type=b200 -L serial:/dev/ttyACM0 -t 3"
+Le paquet (voir [Installation](#installation)) est la voie normale. Depuis
+une copie des sources :
+
+    sudo packaging/install-service.sh 1     # module DKMS, udev, utilisateur dvbrxd, service
+    sudoedit /etc/dvbrxd/0.conf             # DVBRXD_ARGS="-u type=b200 -L serial:/dev/ttyACM0 -t 3"
     sudo systemctl enable --now dvbrxd@0
 
 Le module est chargé au démarrage, `/dev/dvbrxN` et `/dev/dvb` sont au
-groupe `video`, le service `dvbrxd@N` lance `/usr/local/bin/dvbrx` sous
-l'utilisateur `dvbrxd`. Testé avec
+groupe `video`, le service `dvbrxd@N` lance `/usr/local/bin/dvbrx` (paquet :
+`/usr/bin/dvbrx`) sous l'utilisateur `dvbrxd`. Testé avec
 dvbv5-scan / dvbv5-zap et VLC (`cvlc dvb-s2://frequency=11778000000
 --dvb-srate=...`). Pour l'USRP, ajouter la règle udev d'UHD (paquet
 uhd-host) si `dvbrx` ne voit pas le B210.
@@ -382,6 +403,60 @@ on y revient.
 Premier essai réel (HackRF en câble direct, DVB-S2 8PSK 9/10 pilotes,
 15,5 Msym/s à 1200 MHz, multiplex 10950 H via tvheadend) : verrouillage,
 SNR ~14 dB, 0 erreur CRC, 6 services trouvés au scan.
+
+## Organisation du code
+
+- `libdvbrx/` : récepteurs DVB complets en C (GPL-3.0-or-later, une partie
+  étant portée de gr-dvbs2rx) :
+  - `frontend.c` : correction de fréquence (AFC), filtre adapté, synchro
+    rythme symbole (Gardner + interpolation cubique), AGC ;
+  - `pl.c` : synchro trame PL, décodage PLS, désembrouillage, récupération de
+    porteuse (pilotes + interpolation, ou PLL décisionnelle sans pilotes) ;
+  - `demap.c` : démappeur max-log + désentrelacement, toutes les MODCOD
+    DVB-S2 et DVB-S2X jusqu'au 256APSK (hors VL-SNR) ;
+  - `ldpc.c` : LDPC layered min-sum, 32 trames en AVX2 / 64 en AVX-512 ;
+  - `bch.c`, `bb.c` : BCH, désembrouillage BB, reconstruction TS par ISI ;
+  - `dvbs.c` : DVB-S (1re génération) : porteuse, détection automatique du
+    rendement / ambiguïté de phase / poinçonnage, Viterbi K=7, désentrelaceur,
+    Reed-Solomon (204,188), dispersion d'énergie ;
+  - `dvbc.c` : DVB-C (EN 300 429) : fréquence par la raie de puissance 4
+    (FFT), égaliseur CMA puis décisionnel, PLL, décodage différentiel des
+    quadrants, 16 à 256-QAM, détection automatique de la constellation ;
+  - `dvbt.c` : DVB-T (EN 300 744) : détection mode 2K/8K et intervalle de
+    garde sur le préfixe cyclique, fréquence fractionnaire et entière,
+    estimation de canal sur les pilotes dispersés (interpolation à pente de
+    phase compensée), phase commune et horloge d'échantillonnage sur les
+    pilotes continus, TPS, désentrelacements symbole et bit, démapping
+    pondéré par |H|², Viterbi ; flux HP en modulation hiérarchique ;
+  - `dvbt2.c` : DVB-T2 (EN 302 755, profil de base, SISO) : P1 (S1/S2,
+    fréquence), intervalle de garde, symboles P2 et L1-pre / L1-post (LDPC
+    16K raccourci et poinçonné), toutes tailles FFT 1K à 32K, mode étendu,
+    motifs PP1 à PP8, symbole de clôture, désentrelacements fréquentiel,
+    temporel et de cellules, constellations tournées (retard Q cyclique),
+    LDPC 16K/64K (dont les codes propres au T2 : 2/3 normal, 3/5 court),
+    BCH, couche BB (décodage FEC sur 2 threads dédiés, trames décodées en
+    parallèle et restituées dans l'ordre) ; un PLP (`-i`) ; tables générées par
+    `gen/gen_t2_tables.py` depuis gr-dtv ;
+  - `chan.c` : canaliseur multicanal (banc de filtres par convolution
+    rapide, overlap-save : une FFT de la capture partagée par tous les
+    canaux, puis par canal une petite IFFT à son propre débit ; l'inverse du
+    banc de synthèse de dvbtx) ;
+  - `resamp.c` : rééchantillonneur polyphase (débit SDR → débit OFDM,
+    rapport suivant l'horloge de l'émetteur) ;
+  - `conv.c` (Viterbi, poinçonnage) et `outer.c` (synchro paquet,
+    désentrelaceur, RS, dispersion d'énergie) : couches communes DVB-S,
+    DVB-C et DVB-T ; `fft.c` : FFT (OFDM) ;
+  - `rx.c` (mono-thread) et `rxmt.c` (pipeline multi-thread) ;
+  - `gen/` : générateurs des tables (FEC, LDPC, et constellations /
+    entrelacement / codes PLS mesurés sur l'émetteur gr-dtv, sources dans
+    `third_party/gnuradio-dtv`) ;
+  - `tools/dvbrx.c` : le récepteur (démon `dvbrxd@N` en mode pont) ;
+    `tools/sdr_uhd.c`, `sdr_bladerf.c`, `sdr_hackrf.c` : les pilotes de
+    cartes (USRP par l'API C d'UHD, libbladeRF, libhackrf), ou fichier IQ.
+- `gr-dvbrx/`, `apps/dvbrx-dvbs2-rx` : étape intermédiaire (front-end C dans
+  la chaîne GNU Radio gr-dvbs2rx).
+- `tests/` : vecteurs de référence (émetteur gr-dtv) et tests par étage.
+- `bench/` : mesures de débit et de MER.
 
 ## Banc de test sans signal
 
@@ -435,12 +510,6 @@ toutes les tailles FFT × intervalles de garde × motifs de pilotes × mode
 étendu (son générateur de pilotes a 3636 au lieu de 13636, table G.2, alors
 que son mappeur compte les bonnes cellules : signal incohérent) ; vérifié
 avec dvbtx, ainsi que 32K PP8 19/128 et 16K PP2 étendus : 0 erreur.
-
-## Pistes futures
-
-Voir `doc/A_FAIRE.md` : robustesse (resynchronisation DVB-S, égaliseur sans
-pilotes, accrochage DVB-T), DVB-S sur bladeRF et HackRF à mesurer, et les
-pistes d'optimisation de `doc/optimisation/`.
 
 ## Optimisation CPU (3/11/2026)
 
@@ -510,3 +579,51 @@ pistes restantes : `doc/optimisation/`.
 | dvbrx-dvbs2-rx, SNR 11 dB | 33,7 Msym/s |
 | dvbrx-dvbs2-rx, SNR 8,5 dB | 30,4 Msym/s |
 | dvbrx-dvbs2-rx, SNR 8,1 dB (seuil) | 19 Msym/s (limité par le LDPC) |
+## Pistes futures
+
+Voir `doc/A_FAIRE.md` : robustesse (resynchronisation DVB-S, égaliseur sans
+pilotes, accrochage DVB-T), DVB-S sur bladeRF et HackRF à mesurer, et les
+pistes d'optimisation de `doc/optimisation/`.
+
+## Compiler depuis les sources
+
+
+    git clone --recursive https://github.com/igorauad/gr-dvbs2rx third_party/gr-dvbs2rx
+    cmake -S third_party/gr-dvbs2rx -B third_party/gr-dvbs2rx/build \
+          -DCMAKE_INSTALL_PREFIX=$PWD/prefix -DCMAKE_BUILD_TYPE=Release \
+          -DNATIVE_OPTIMIZATIONS=ON -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+    cmake --build third_party/gr-dvbs2rx/build -j8
+    cmake --install third_party/gr-dvbs2rx/build
+    . ./env.sh
+
+    make -C libdvbrx                                  # bibliothèque C + fe_bench
+    cmake -S gr-dvbrx -B gr-dvbrx/build && cmake --build gr-dvbrx/build   # bloc GNU Radio
+
+Dépendances système : gnuradio (+ gnuradio-dev sur Debian), libuhd, FFTW
+(libfftw3-dev, simple précision), pybind11, tsduck, ffmpeg. Pour `dvbrx`
+seul : FFTW et, selon les cartes voulues, libuhd-dev, libbladerf-dev,
+libhackrf-dev (chaque pilote est compilé si son en-tête est présent).
+
+Le récepteur seul : FFTW et, selon les cartes, les en-têtes de libuhd, libbladeRF et libhackrf
+(les bibliothèques des cartes sont chargées à l'exécution) :
+
+```bash
+sudo apt install build-essential libfftw3-dev libuhd-dev libbladerf-dev libhackrf-dev
+make -C libdvbrx                                   # libdvbrx/build/dvbrx
+sudo packaging/install-service.sh 1                # installation depuis ici, avec le module DKMS
+./packaging/build-deb.sh dist/                     # les .deb pour ce système
+./packaging/build-all-debs.sh                      # les .deb pour toutes les versions (docker)
+```
+
+## Documentation
+
+- `dvbrx --help`, `man dvbrx` (`man -L fr dvbrx` en français) et `man dvbrx-web` ;
+- [`doc/dvbrx-web-api.md`](doc/dvbrx-web-api.md) : le socket de contrôle de dvbrx ;
+- [`doc/lnb-protocol.md`](doc/lnb-protocol.md) : le protocole du contrôleur de LNB ;
+- [`apps/dvbrx-web/README.md`](apps/dvbrx-web/README.md) : la page web ;
+- [`doc/A_FAIRE.md`](doc/A_FAIRE.md) et [`doc/optimisation/`](doc/optimisation/) : travaux en cours
+  et mesures.
+
+## Licence
+
+GPL-3.0-or-later ; le module noyau (`kernel/`) est sous GPL-2.0. © 2026 BILLY Rémi.
