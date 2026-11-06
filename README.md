@@ -186,6 +186,22 @@ Le module noyau `kernel/dvbrx` crée des adaptateurs DVB-S/S2 classiques
   USB partagé » : ~2,4 dB de moins en DVB-C sur le câble) : DVB-S2 QPSK à 32APSK,
   avec et sans pilotes, 18/18 ; DVB-C 16 à 256-QAM (le 256-QAM accroche un
   peu plus lentement à 1,28 : ~20 paquets perdus à l'accord) ; DVB-S à 1,5.
+  En réel (6/11/2026, dvbtx → coupleur sur câble fermé, FI 1200 MHz, gain
+  TX 20 dB, sondages en mode pont) :
+
+  | Signal | Carte | Débit | Éch./symbole | SNR | Erreurs en régime |
+  |---|---|---|---|---|---|
+  | DVB-S2 QPSK 3/4, 46 Msym/s, roll-off 0,20 | B210 | 61,44 Msps | 1,34 | 17,8 dB | 0 (TS 66,8 Mbit/s) |
+  | DVB-S2 QPSK 3/4, 50 Msym/s, 0,10 | B210 | 61,44 Msps | 1,23 | 17,2 dB | 0 (72,4 Mbit/s) |
+  | DVB-S2 QPSK 3/4, 52 Msym/s, 0,05 | B210 | 61,44 Msps | 1,18 | 16,6 dB | 0 (75,6 Mbit/s) |
+  | DVB-S2 QPSK 3/4, 15 Msym/s, 0,20 | HackRF | 20 Msps | 1,33 | ~20 dB | pertes USB (hub) |
+  | DVB-S2 QPSK 3/4, 17 Msym/s, 0,05 | HackRF | 20 Msps | 1,18 | ~19 dB | pertes USB (hub) |
+  | DVB-S QPSK 3/4, 13,3 Msym/s, 0,35 | B210 / HackRF | 30,72 / 20 Msps | 2,3 / 1,5 | 21,0 / 16,3 dB | 0 / 2,6 % |
+
+  Avant cette règle, le mode pont refusait tout au-delà de 37,3 Msym/s sur
+  B210. Les échecs FEC de l'accrochage (quelques secondes, gain automatique)
+  ne sont pas comptés. Le HackRF fait 2 à 7 % de paquets en erreur en DVB-S
+  même à 2 éch./symbole et sans perte USB : défaut à part, à étudier.
   Suréchantillonner davantage n'apporte rien : HackRF sur le DVB-C 602 MHz
   (64-QAM, 6,875 Mbd, gain 70, 4 × 30 s alternés), 1,8-2,0 % de paquets en
   erreur à 13,75 Msps (2 éch./symbole) contre 3,9-4,5 % à 20 Msps.

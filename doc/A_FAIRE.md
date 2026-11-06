@@ -150,3 +150,14 @@ T, T2, C et le frontal.
   décrit dans `doc/lnb-protocol.md`.
 - Côté émetteur (projet dvbtx) : CPU du banc de filtres à 114 % à 52 MBd,
   sans sous-débit pour l'instant (à suivre par la session dvbtx).
+
+## HackRF en DVB-S (6/11/2026)
+
+Sur le câble fermé (dvbtx, 1200 MHz), le HackRF verrouille le DVB-S QPSK 3/4
+avec 16 à 20 dB de SNR mais perd 2,6 à 6,7 % des paquets (10 Msym/s à
+2 éch./symbole, 13,3 Msym/s à 1,5), sans aucune perte USB (compteur M0 à 0) ;
+le B210 reçoit les mêmes signaux sans erreur. Pistes : écrêtage de l'ADC 8 bits
+pendant le réglage du gain (niveau −12 dBFS vu au sondage), filtre analogique
+choisi à 24 MHz pour 20 Msps (repliement), coupe-continu au centre du signal
+(accord au centre : essayer un accord décalé).
+
