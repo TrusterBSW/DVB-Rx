@@ -399,15 +399,27 @@ static void radio_fill(struct radio* r, double lost)
     }
 }
 
+/* The SDR stopped answering (unplugged): calling its library again can
+ * crash it (libbladeRF ended on a SIGFPE), so exit at once; systemd
+ * restarts the daemon, which opens the SDR again when it is back. */
+static void radio_lost(const struct radio* r)
+{
+    fprintf(stderr, "%s: the SDR does not answer any more (unplugged?): exiting\n", r->info.name);
+    fflush(stderr);
+    _exit(3);
+}
+
 static void* sdr_thread(void* arg)
 {
     struct radio* r = arg;
     const struct sdr_driver* d = r->drv;
     enum { N = 65536 };
     float* buf = malloc(sizeof(float) * 2 * N);
-    d->start(r->dev);
+    if (d->start(r->dev))
+        radio_lost(r);
     double t_next = -1; /* device time of the next sample expected */
     struct level lv = { 0 };
+    int errors = 0;
     while (r->running) {
         int got = 0;
         while (got < N && r->running) {
@@ -431,8 +443,15 @@ static void* sdr_thread(void* arg)
                 /* After an overflow the B2xx may stop streaming: restart. */
                 fprintf(stderr, "%s: receive timeout, restarting the stream\n", r->info.name);
                 d->stop(r->dev);
-                d->start(r->dev);
+                if (d->start(r->dev))
+                    radio_lost(r);
+            } else if (st == SDR_ERROR) {
+                if (++errors >= 20) /* 20 errors in a row */
+                    radio_lost(r);
+                usleep(10000);
             }
+            if (n > 0)
+                errors = 0;
             got += n;
         }
         /* Never block the radio: drop samples if the receiver is behind. */
@@ -1733,7 +1752,8 @@ static int radio_capture_at(struct radio* r, double freq, double rate, double ga
     for (int pass = 0; pass < (auto_g ? 3 : 1); pass++) {
         const int skip = (int)(0.02 * r->rate) + 4096;
         const int want = pass < (auto_g ? 2 : 0) ? 16384 : n;
-        d->start(r->dev);
+        if (d->start(r->dev))
+            radio_lost(r);
         int got = -skip;
         float tmp[2 * 8192];
         double p = 0;
@@ -1744,6 +1764,8 @@ static int radio_capture_at(struct radio* r, double freq, double rate, double ga
             /* the samples skipped end exactly where the capture starts */
             const int room = got < 0 ? (-got < 8192 ? -got : 8192) : want - got;
             const int k = d->read(r->dev, ptr, room, 1.0, &t, &st);
+            if (st == SDR_ERROR)
+                radio_lost(r);
             if (k <= 0 && st != SDR_OVERFLOW)
                 break;
             if (got >= 0)

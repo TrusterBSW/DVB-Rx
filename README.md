@@ -250,7 +250,16 @@ dans `/run/dvbrx/usb-N` :
 - budget par bus : 350 Mo/s en USB 3, 42 Mo/s en USB 2 ; `-U MO/S` le
   change (à mettre identique sur toutes les cartes d'un bus), `-U 0`
   désactive le partage ; les courtes captures des scans de dvbrx-web ne sont
-  pas comptées ; le statut (`radio.usb`) et dvbrx-web montrent l'occupation.
+  pas comptées, ni les autres périphériques du bus (clé TNT, disque…) ; le
+  statut (`radio.usb`) et dvbrx-web montrent l'occupation.
+- Vécu le 6/11/2026 : un HackRF à 20 Msps derrière un petit hub USB 2,
+  partagé avec une clé RTL2832 et un B210 (inactifs), perdait ~14 fois par
+  seconde des échantillons (compteur « shortfalls » du HackRF,
+  `hackrf_debug --state`, et `hackrf_transfer` seul en faisait autant),
+  contre aucune perte branché seul : un HackRF veut son propre port, sans hub.
+- Carte débranchée : le démon s'arrête (« the SDR does not answer any more »)
+  au lieu d'insister (libbladeRF finissait par planter, SIGFPE) ; systemd le
+  relance et il rouvre la carte quand elle revient.
 
 Descendre a un prix en conditions réelles : sur le câble SFR, bladeRF sur le
 DVB-C 658 MHz (64-QAM), SNR 26,7 dB à 13,75 Msps (2 éch./symbole) contre
