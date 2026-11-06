@@ -264,6 +264,11 @@ Socket de contrôle pour
 .BI \-P " DB"
 Estimation de la puissance d'entrée : dBm à 0 dBFS et 0 dB de gain
 (défaut 0).
+.TP
+.BI \-U " MO/S"
+Débit USB partagé par les radios du même bus (défaut : 350 en USB 3, 42 en
+USB 2 ; 0 : pas de partage), voir
+.BR "DÉBIT USB" .
 .SS Commun
 .TP
 .BI \-t " N"
@@ -359,6 +364,35 @@ Les deux reçoivent des multiplex différents en même temps ; chaque carte est
 désignée par son numéro de série, l'ordre de branchement ne compte pas. Le
 coût est celui de deux récepteurs (DVB-T2 ou DVB-S2 : un à deux cœurs
 chacun).
+.SH DÉBIT USB
+L'USB est limitant : une carte AD9361 envoie 4 octets par échantillon
+(246 Mo/s à 61,44 Msps), un HackRF 2 (40 Mo/s à 20 Msps) ; un bus USB 3
+porte environ 350 Mo/s utiles, un bus USB 2 environ 42. Des ports
+différents ne veulent pas dire des contrôleurs différents : tous les ports
+d'un contrôleur, et ceux des hubs branchés dessus, partagent sa bande ; un
+contrôleur xHCI a un bus USB 2 et un bus USB 3 sur des lignes séparées
+.RB ( "lsusb \-t" ).
+.PP
+Les démons d'un même bus se partagent son débit
+.RI ( /run/dvbrx/usb\- N ).
+À un réglage, un démon prend son plein débit (2 échantillons par symbole)
+s'il est seul, sinon ce que les autres laissent, sans descendre sous le
+minimum du canal ; s'il manque de place, les autres redescendent par un
+nouveau réglage (environ 1 s sans TS pour eux) et gardent ce débit jusqu'à
+leur prochain réglage. Sans place au bout de 2,5 s, il prend son minimum
+quand même.
+.B \-U
+.I MO/S
+change le budget du bus (350 en USB 3, 42 en USB 2 par défaut ; même valeur
+pour toutes les cartes d'un bus),
+.B \-U 0
+désactive le partage. Les captures des scans de
+.BR dvbrx\-web (8)
+ne sont pas comptées.
+.PP
+Descendre coûte du SNR en réel (câble, multiplex voisins : 2,4 dB en DVB-C
+64-QAM à 1,28 échantillon par symbole) : le démon ne le fait que si la
+carte ou le bus l'impose.
 .SH FICHIERS
 .TP
 .BI /dev/dvbrx N
@@ -376,6 +410,11 @@ Options du service
 Nombre d'adaptateurs du module
 .RB ( "options dvbrx adapters=" \fIN\fR,
 1 à 8).
+.TP
+.BI /run/dvbrx/usb\- N
+Débit USB utilisé par le démon
+.IR N ,
+lu par les autres démons du même bus.
 .TP
 .BI /run/dvbrx/dvbrx\- N .sock
 Socket de contrôle (JSON par ligne : status, constellation, probe, monitor,

@@ -111,7 +111,7 @@ static struct sdr* hrf_open(const char* args, double mcr, struct sdr_info* info)
     uint8_t board = 0;
     hackrf_board_id_read(s->dev, &board);
     *info = (struct sdr_info){ .name = "HackRF", .gain_min = 0, .gain_max = 116, .rate_max = 20e6,
-                               .bw_min = 1.75e6, .bw_max = 28e6, .timestamps = 0 };
+                               .bw_min = 1.75e6, .bw_max = 28e6, .timestamps = 0, .usb_bytes = 2 /* 8-bit I/Q */ };
     snprintf(info->model, sizeof(info->model), "%s", hackrf_board_id_name((enum hackrf_board_id)board));
     /* the MCU's unique ID, as hackrf_info prints it, without the leading
      * zeros (hackrf_open_by_serial() matches the end of the number) */
@@ -225,11 +225,12 @@ static int hrf_start(struct sdr* s)
     s->head = s->tail = 0;
     s->dropped = 0;
     pthread_mutex_unlock(&s->lock);
-    hackrf_m0_state m0;
-    s->shortfalls = !hackrf_get_m0_state(s->dev, &m0) ? m0.num_shortfalls : 0;
-    s->t_check = mono();
     if (hrf_check(hackrf_start_rx(s->dev, rx_cb, s), "start"))
         return -1;
+    /* the firmware clears its counters when the receive mode starts: a
+     * count read before would be the last session's */
+    s->shortfalls = 0;
+    s->t_check = mono();
     s->streaming = 1;
     return 0;
 }

@@ -208,6 +208,7 @@ function renderStatus(st) {
     ['Source', esc(r.source ?? '—')],
     ['Carte', esc(r.model || '—')],
     ['N° de série', r.serial ? `<code>${esc(r.serial)}</code>` : '—'],
+    ['USB', r.usb ? `${num(r.usb.used / 1e6, 0)} Mo/s (autres cartes du bus : ${num(r.usb.others / 1e6, 0)}) sur ${num(r.usb.budget / 1e6, 0)}, USB ${r.usb.speed >= 5000 ? '3' : '2'}` : '—'],
     ['Fréquence', mhz(r.freq)],
     ['Filtre analogique', isNum(r.bandwidth) && r.bandwidth > 0 ? mhz(r.bandwidth, 2) : 'ouvert / —'],
     ['Échantillonnage', isNum(r.rate) ? `${num(r.rate / 1e6, 3)} MS/s` : '—'],

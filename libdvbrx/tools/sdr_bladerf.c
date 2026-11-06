@@ -109,7 +109,8 @@ static struct sdr* brf_open(const char* args, double mcr, struct sdr_info* info)
     if (e && *e)
         s->meta = *e != '0';
     *info = (struct sdr_info){ .name = "bladeRF", .gain_min = 0, .gain_max = 60, .rate_max = 61.44e6,
-                               .bw_min = 0.2e6, .bw_max = 56e6, .timestamps = s->meta };
+                               .bw_min = 0.2e6, .bw_max = 56e6, .timestamps = s->meta,
+                               .usb_bytes = 4 /* SC16 Q11 */ };
     const struct bladerf_range* r;
     if (!bladerf_get_gain_range(s->dev, s->ch, &r)) {
         info->gain_min = r->min * r->scale;

@@ -25,6 +25,7 @@ Requête : `{"cmd": "status"}`
 ```json
 {"ok": true,
  "radio": {"source": "uhd", "model": "B210", "serial": "31A5B7C",
+           "usb": {"speed": 5000, "budget": 350000000, "used": 55000000, "others": 0},
            "rate_max": 56000000, "multi": true,
            "freq": 586000000, "rate": 10240000, "bandwidth": 9020000,
            "gain": 50, "agc": "level|search|best|manual", "level_dbfs": -24.1,
@@ -44,6 +45,8 @@ Requête : `{"cmd": "status"}`
 - **`input_dbm`** : estimation de la puissance d'entrée avant l'amplification, calculée comme
   `level_dbfs − gain + offset`. L’offset vaut 0 dB par défaut et se règle avec `-P DB` ; ce n'est pas une mesure calibrée.
 - **`ts_mbps`** : débit TS utile, calculé sur les dernières secondes.
+- **`usb`** : bus USB de la carte, `null` sans partage : vitesse (Mbit/s), budget du bus, débit
+  utilisé par ce démon et par les autres démons du bus (octets/s).
 - **`source`** : `uhd`, `bladerf`, `hackrf` ou `file`. **`model`**, **`serial`** : modèle et
   numéro de série de la carte (`""` tant qu'elle n'est pas ouverte). **`rate_max`** : débit d'échantillonnage
   maximal de la radio (20 MS/s pour un HackRF) ; le scan en tient compte. **`multi`** : faux

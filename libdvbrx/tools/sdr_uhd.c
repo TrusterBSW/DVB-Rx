@@ -38,7 +38,8 @@ static struct sdr* uhd_open(const char* args, double mcr, struct sdr_info* info)
     if (mcr > 0)
         uhd_usrp_set_master_clock_rate(s->usrp, mcr, 0);
     *info = (struct sdr_info){ .name = "UHD", .gain_min = 0, .gain_max = 60, .rate_max = 61.44e6,
-                               .bw_min = 0.2e6, .bw_max = 56e6, .timestamps = 1 };
+                               .bw_min = 0.2e6, .bw_max = 56e6, .timestamps = 1,
+                               .usb_bytes = 4 /* sc16 over the wire */ };
     uhd_usrp_rx_info_t ri;
     if (!uhd_usrp_get_rx_info(s->usrp, 0, &ri)) {
         snprintf(info->model, sizeof(info->model), "%s", ri.mboard_id ? ri.mboard_id : "");

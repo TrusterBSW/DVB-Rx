@@ -21,6 +21,7 @@ struct sdr_info {
     int timestamps;            /* reads give the device time: gaps can be filled */
     char model[48];            /* e.g. "B210", "HackRF One", "bladeRF 2.0 xA4"; "" unknown */
     char serial[48];           /* the board's serial number, "" unknown */
+    int usb_bytes;             /* bytes per I/Q sample on the USB bus (0: not USB) */
 };
 
 struct sdr;

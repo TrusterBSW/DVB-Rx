@@ -69,6 +69,7 @@
 #include <sys/un.h>
 
 #include <arpa/inet.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -84,6 +85,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <termios.h>
@@ -754,6 +756,7 @@ struct bridge {
     uint64_t rate_pk;
     double ts_mbps;
     int named;              /* the frontend carries the SDR's name */
+    double last_usb;        /* last look at the other SDRs on the USB bus */
 };
 
 /* ---- several adapters on one wideband capture ----------------------------- */
@@ -1036,6 +1039,198 @@ static void rx_cfg_for(const struct bridge* b, const struct dvbrx_tune* t, doubl
     }
 }
 
+/* ---- USB bandwidth shared with the other daemons ------------------------- */
+
+/* The SDRs on one USB bus (the root hub of a controller: every port of that
+ * controller, through hubs too) share its bandwidth: 5 Gbit/s USB 3 carries
+ * ~350 MB/s of samples, one B210 or bladeRF at 61.44 Msps takes 246 MB/s.
+ * Each daemon finds its SDR's bus in sysfs (by serial number) and writes
+ * what it uses to /run/dvbrx/usb-N; at a tuning it takes what the others
+ * leave, its full rate when it is alone. When that is less than the
+ * channel's least rate, it asks for room ("need") and the others on the
+ * bus go down to what they leave (a retuning, ~1 s without TS for them);
+ * they keep that rate until their next tuning. */
+#define USB_DIR "/run/dvbrx"
+
+static double usb_budget_opt = -1; /* -U: MB/s for the bus, 0 off; < 0: from its speed */
+
+static struct {
+    int ok, tried;
+    int index;          /* /run/dvbrx/usb-N */
+    char bus[256];      /* sysfs path of the bus's root hub */
+    double speed;       /* Mbit/s */
+    double budget;      /* B/s for the samples of all the SDRs on the bus */
+    double bytes;       /* bytes per sample */
+    double used, least, need; /* B/s: in use, least for the channel, asked for */
+} usb;
+
+static int usb_ends_with(const char* s, const char* end)
+{
+    const size_t a = strlen(s), b = strlen(end);
+    return b >= 6 && a >= b && !strcasecmp(s + a - b, end);
+}
+
+static void usb_write(void)
+{
+    if (!usb.ok)
+        return;
+    char path[64], tmp[72];
+    snprintf(path, sizeof(path), USB_DIR "/usb-%d", usb.index);
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    FILE* f = fopen(tmp, "w");
+    if (!f)
+        return;
+    fprintf(f, "%s %.0f %.0f %.0f %d\n", usb.bus, usb.used, usb.least, usb.need, (int)getpid());
+    if (fclose(f) || rename(tmp, path))
+        unlink(tmp);
+}
+
+/* What the other daemons on the bus use and ask for (B/s). */
+static void usb_others(double* used, double* need)
+{
+    *used = *need = 0;
+    DIR* d = opendir(USB_DIR);
+    if (!d)
+        return;
+    struct dirent* e;
+    char own[32];
+    snprintf(own, sizeof(own), "usb-%d", usb.index);
+    while ((e = readdir(d))) {
+        if (strncmp(e->d_name, "usb-", 4) || strchr(e->d_name, '.') || !strcmp(e->d_name, own))
+            continue;
+        char path[300], bus[256];
+        snprintf(path, sizeof(path), USB_DIR "/%s", e->d_name);
+        FILE* f = fopen(path, "r");
+        if (!f)
+            continue;
+        double u, l, n;
+        int pid;
+        const int ok = fscanf(f, "%255s %lf %lf %lf %d", bus, &u, &l, &n, &pid) == 5;
+        fclose(f);
+        if (!ok || strcmp(bus, usb.bus) || (kill(pid, 0) && errno != EPERM))
+            continue; /* another bus, or a daemon gone */
+        *used += u;
+        *need += n;
+    }
+    closedir(d);
+}
+
+/* Finds the SDR's USB bus, once it is open. */
+static void usb_setup(const struct bridge* b)
+{
+    const struct radio* r = b->radio;
+    if (usb.tried || !r->dev)
+        return;
+    usb.tried = 1;
+    if (usb_budget_opt == 0 || b->hub || !r->info.usb_bytes || !r->info.serial[0])
+        return;
+    DIR* d = opendir("/sys/bus/usb/devices");
+    if (!d)
+        return;
+    struct dirent* e;
+    char dev[PATH_MAX] = "";
+    while ((e = readdir(d)) && !dev[0]) {
+        if (e->d_name[0] == '.' || strchr(e->d_name, ':'))
+            continue;
+        char path[300], sn[128] = "";
+        snprintf(path, sizeof(path), "/sys/bus/usb/devices/%s/serial", e->d_name);
+        FILE* f = fopen(path, "r");
+        if (!f)
+            continue;
+        if (fgets(sn, sizeof(sn), f))
+            sn[strcspn(sn, "\r\n")] = 0;
+        fclose(f);
+        if (usb_ends_with(sn, r->info.serial)) {
+            snprintf(path, sizeof(path), "/sys/bus/usb/devices/%s", e->d_name);
+            if (!realpath(path, dev))
+                dev[0] = 0;
+        }
+    }
+    closedir(d);
+    /* .../0000:00:14.0/usb2/2-1/2-1.3: the bus is the "usbN" component */
+    const char* u = strstr(dev, "/usb");
+    while (u && !(u[4] >= '0' && u[4] <= '9'))
+        u = strstr(u + 1, "/usb");
+    if (!u) {
+        fprintf(stderr, "USB: serial %s not found in /sys/bus/usb: the bandwidth is not shared\n",
+                r->info.serial);
+        return;
+    }
+    const char* end = strchr(u + 1, '/');
+    snprintf(usb.bus, sizeof(usb.bus), "%.*s", (int)((end ? end : u + strlen(u)) - dev), dev);
+    char path[PATH_MAX + 8];
+    snprintf(path, sizeof(path), "%s/speed", dev);
+    FILE* f = fopen(path, "r");
+    if (!f || fscanf(f, "%lf", &usb.speed) != 1)
+        usb.speed = 0;
+    if (f)
+        fclose(f);
+    usb.budget = usb_budget_opt > 0   ? usb_budget_opt * 1e6
+                 : usb.speed >= 10000 ? 700e6
+                 : usb.speed >= 5000  ? 350e6
+                 : usb.speed >= 480   ? 42e6
+                                      : 0;
+    if (usb.budget <= 0)
+        return;
+    usb.bytes = r->info.usb_bytes;
+    usb.index = b->index;
+    mkdir(USB_DIR, 0755);
+    usb.ok = 1;
+    usb_write();
+    if (access(USB_DIR, W_OK)) {
+        usb.ok = 0;
+        return;
+    }
+    fprintf(stderr, "USB: %s at %.0f Mbit/s, %.0f MB/s shared with the SDRs on that bus\n", usb.bus,
+            usb.speed, usb.budget / 1e6);
+}
+
+/* The highest sample rate this tuning may take on the bus (INFINITY: no
+ * limit): what the others leave, after asking them for room if that is
+ * less than the channel's least rate. Called with ctl_lock held. */
+static double usb_cap(const struct chan_need* n)
+{
+    if (!usb.ok)
+        return INFINITY;
+    double used, need;
+    usb_others(&used, &need);
+    double avail = (usb.budget - used - need) / usb.bytes;
+    if (avail >= n->min)
+        return avail;
+    usb.need = n->min * usb.bytes;
+    usb_write();
+    fprintf(stderr, "USB: %.0f MB/s left on the bus, %.0f MB/s needed: asking the other SDRs for room\n",
+            (usb.budget - used - need) / 1e6, usb.need / 1e6);
+    for (int i = 0; i < 25 && avail < n->min; i++) {
+        usleep(100000);
+        usb_others(&used, &need);
+        avail = (usb.budget - used - need) / usb.bytes;
+    }
+    usb.need = 0;
+    if (avail < n->min) {
+        fprintf(stderr, "USB: only %.0f MB/s left, taking the least rate anyway (overflows likely)\n",
+                avail * usb.bytes / 1e6);
+        return n->min;
+    }
+    return avail;
+}
+
+/* Another daemon on the bus asks for room this one could give: retune at
+ * what it leaves (bridge loop, ctl_lock held). */
+static void bridge_tune(struct bridge* b, const struct dvbrx_tune* t);
+static void usb_yield(struct bridge* b)
+{
+    if (!usb.ok || !b->mt || b->hub || usb.used <= usb.least * 1.01)
+        return;
+    double used, need;
+    usb_others(&used, &need);
+    if (need <= 0 || usb.used + used + need <= usb.budget)
+        return;
+    fprintf(stderr, "USB: another SDR on the bus needs %.0f MB/s: retuning lower\n", need / 1e6);
+    const struct dvbrx_tune t = b->tune;
+    bridge_tune(b, &t);
+}
+
 static void bridge_stop_rx(struct bridge* b)
 {
     b->gen++;
@@ -1044,6 +1239,10 @@ static void bridge_stop_rx(struct bridge* b)
         return;
     }
     radio_stop(b->radio);
+    if (usb.used > 0) {
+        usb.used = usb.least = 0;
+        usb_write();
+    }
     if (b->mt) {
         drx_mt_free(b->mt);
         b->mt = NULL;
@@ -1057,13 +1256,17 @@ static double single_rate(struct bridge* b, const struct dvbrx_tune* t, const st
 {
     const double freq = t->frequency_khz * 1e3;
     double want = n->want > b->max_rate ? b->max_rate : n->want;
+    const double cap = usb_cap(n); /* what the other SDRs on the USB bus leave */
+    if (want > cap)
+        want = cap;
     if (want < n->min)
         return -1;
     b->radio->bw_need = n->occ;
     double rate = radio_configure(b->radio, freq, want);
     if (is_ofdm(t) && rate > 0 && rate < n->min) /* rounded down below what is needed */
         rate = radio_configure(b->radio, freq, n->min * 1.3);
-    return rate >= n->min ? rate : -1;
+    /* the SDR may round the least rate a hair down (8.784721 for 8.784722) */
+    return rate >= n->min * 0.999 ? rate : -1;
 }
 
 static void log_tune(const struct bridge* b, const struct dvbrx_tune* t)
@@ -1137,6 +1340,11 @@ static void bridge_tune(struct bridge* b, const struct dvbrx_tune* t)
         if (rate <= 0) {
             fprintf(stderr, "tune: no usable sample rate (%.3f Msps needed)\n", need.min / 1e6);
             return;
+        }
+        if (usb.ok) {
+            usb.used = rate * usb.bytes;
+            usb.least = need.min * usb.bytes;
+            usb_write();
         }
         rx_cfg_for(b, t, rate, &cfg);
     }
@@ -1352,6 +1560,13 @@ static void status_json(struct sbuf* o)
     json_safe(model, r->dev ? r->info.model : "", sizeof(model));
     json_safe(serial, r->dev ? r->info.serial : "", sizeof(serial));
     sb_printf(o, "\"model\": \"%s\", \"serial\": \"%s\", ", model, serial);
+    if (usb.ok) {
+        double used, need;
+        usb_others(&used, &need);
+        sb_printf(o, "\"usb\": {\"speed\": %.0f, \"budget\": %.0f, \"used\": %.0f, \"others\": %.0f}, ",
+                  usb.speed, usb.budget, usb.used, used);
+    } else
+        sb_printf(o, "\"usb\": null, ");
     sb_printf(o, "\"rate_max\": %.0f, \"multi\": %s, ", r->file ? 61.44e6 : r->dev ? r->info.rate_max : r->drv ? r->drv->rate_max : 0,
               r->file || (r->drv && r->drv->multi) ? "true" : "false");
     sb_num(o, "freq", r->freq, 0);
@@ -2106,6 +2321,11 @@ static int run_bridges(struct bridge* b, int n)
         pthread_mutex_lock(&ctl_lock);
         for (int i = 0; i < n; i++) {
             bridge_name(&b[i]); /* the SDR opened at the first tuning */
+            usb_setup(&b[i]);
+            if (now() - b[i].last_usb >= 0.25) {
+                usb_yield(&b[i]);
+                b[i].last_usb = now();
+            }
             if (now() - b[i].last_status >= 0.2) {
                 if (!b[i].mode) /* the application sees its own reception only */
                     bridge_status(&b[i]);
@@ -2143,6 +2363,11 @@ static int run_bridges(struct bridge* b, int n)
     for (int i = 0; i < n; i++) {
         bridge_stop_rx(&b[i]);
         close(b[i].ctl);
+    }
+    if (usb.ok) {
+        char path[64];
+        snprintf(path, sizeof(path), USB_DIR "/usb-%d", usb.index);
+        unlink(path);
     }
     return 0;
 }
@@ -2328,7 +2553,7 @@ static void usage_to(FILE* f, const char* prog)
             "[-t THREADS] [-R]\n"
             "       %s (-u [DRIVER:]ARGS | -F FILE) -S RATE -m CHANNEL [-m CHANNEL]... [-f FREQ]\n"
             "       %s -d N [-n ADAPTERS [-W RATE]] (-u [DRIVER:]ARGS | -F FILE) [-S MAX_RATE] [-G GAIN] "
-            "[-A ANT] [-M MCR] [-L LNB] [-C PATH] [-t THREADS]\n"
+            "[-A ANT] [-M MCR] [-L LNB] [-C PATH] [-U MB/S] [-t THREADS]\n"
             "       %s -h | --help\n",
             prog, prog, prog, prog);
 }
@@ -2390,6 +2615,8 @@ static void help(const char* prog)
           "  -C CHEMIN         socket de contrôle de dvbrx-web (défaut /run/dvbrx/dvbrx-N.sock,\n"
           "                    \"\" : aucun)\n"
           "  -P DB             puissance d'entrée estimée : dBm à 0 dBFS et 0 dB de gain (défaut 0)\n"
+          "  -U MO/S           débit USB partagé par les radios du même bus (défaut : 350 en USB 3,\n"
+          "                    42 en USB 2 ; 0 : pas de partage), voir dvbrx(8)\n"
           "\n"
           "Commun\n"
           "  -t N              threads LDPC (défaut 2)\n"
@@ -2418,9 +2645,10 @@ int main(int argc, char** argv)
             help(argv[0]);
             return 0;
         }
-    while ((opt = getopt(argc, argv, "hu:F:f:S:G:A:B:C:P:M:s:r:D:g:i:o:t:Rd:L:l:c:T:2:n:W:x:m:")) != -1) {
+    while ((opt = getopt(argc, argv, "hU:u:F:f:S:G:A:B:C:P:M:s:r:D:g:i:o:t:Rd:L:l:c:T:2:n:W:x:m:")) != -1) {
         switch (opt) {
         case 'h': help(argv[0]); return 0;
+        case 'U': usb_budget_opt = atof(optarg); break;
         case 'u': dev_spec = optarg; break;
         case 'F': radio.file = optarg; break;
         case 'f': freq = atof(optarg); break;

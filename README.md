@@ -182,7 +182,8 @@ Le module noyau `kernel/dvbrx` crée des adaptateurs DVB-S/S2 classiques
   l'AD9361 coûtent ~3 dB, mesure dvbtx). Soit 1,5 éch./symbole en DVB-S,
   1,28 en DVB-C, 1,33 à 1,17 en DVB-S2 (roll-off 0,20 à 0,05 ; roll-off
   automatique : compté 0,35). Sur fichier (6/11/2026), aucune perte de
-  SNR à ces débits par rapport à 2 éch./symbole : DVB-S2 QPSK à 32APSK,
+  SNR à ces débits par rapport à 2 éch./symbole (mais en réel, voir « Débit
+  USB partagé » : ~2,4 dB de moins en DVB-C sur le câble) : DVB-S2 QPSK à 32APSK,
   avec et sans pilotes, 18/18 ; DVB-C 16 à 256-QAM (le 256-QAM accroche un
   peu plus lentement à 1,28 : ~20 paquets perdus à l'accord) ; DVB-S à 1,5.
   Suréchantillonner davantage n'apporte rien : HackRF sur le DVB-C 602 MHz
@@ -215,6 +216,50 @@ avec leur carte. Essai du 6/11/2026 (bladeRF + HackRF, câble SFR, via
 tvheadend) : DVB-T 554 MHz sur le bladeRF sans erreur pendant que le HackRF
 recevait le DVB-C 602 MHz (QAM64, SNR 24,8 dB, 3 % de blocs en erreur : le
 HackRF est à la limite sur ce câble) ; aucun débordement.
+
+### Débit USB partagé
+
+L'USB est limitant : une carte AD9361 (B210, bladeRF) envoie 4 octets par
+échantillon, soit 246 Mo/s à 61,44 Msps et 220 Mo/s pour un transpondeur
+de 27 500 kBd (55 Msps) ; l'USB 3 (5 Gbit/s) n'en porte qu'environ
+350 Mo/s utiles par bus. Une carte seule tient, deux cartes en satellite
+large sur le même bus non. Le HackRF (2 octets par échantillon, 40 Mo/s à
+20 Msps) est déjà au plafond de l'USB 2 (~42 Mo/s).
+
+**Des ports différents ne veulent pas dire des contrôleurs différents** :
+tous les ports d'un contrôleur (et ceux des hubs branchés dessus) partagent
+sa bande. Un contrôleur xHCI a deux bus, l'un USB 2 et l'autre USB 3, sur
+des lignes séparées : une carte USB 2 (HackRF) ne prend rien à une carte
+USB 3 du même contrôleur. `lsusb -t` montre les bus (`Bus 002 … 5000M`) et
+ce qui est branché dessus ; ici le HackRF (usb1, 480M) et le bladeRF (usb2,
+5000M) sont sur le même contrôleur `0000:00:14.0`.
+
+Les démons se partagent la bande d'un bus. Chacun trouve le bus de sa carte
+dans `/sys/bus/usb` (par son numéro de série) et écrit ce qu'il utilise
+dans `/run/dvbrx/usb-N` :
+
+- à un réglage, il prend son plein débit (2 éch./symbole) s'il est seul sur
+  le bus, sinon ce que les autres laissent, sans descendre sous le minimum
+  du canal (débit symbole × (1 + roll-off) / 0,9) ;
+- s'il manque de place, il en demande : les autres cartes du bus redescendent
+  à ce qu'elles peuvent laisser, par un nouveau réglage (environ 1 s sans
+  TS pour elles), puis il se règle ; sans place au bout de 2,5 s, il prend
+  son minimum quand même (débordements probables) ;
+- une carte redescendue garde ce débit jusqu'à son prochain réglage (changement
+  de chaîne) : remonter couperait le flux, pour au plus quelques dB ;
+- budget par bus : 350 Mo/s en USB 3, 42 Mo/s en USB 2 ; `-U MO/S` le
+  change (à mettre identique sur toutes les cartes d'un bus), `-U 0`
+  désactive le partage ; les courtes captures des scans de dvbrx-web ne sont
+  pas comptées ; le statut (`radio.usb`) et dvbrx-web montrent l'occupation.
+
+Descendre a un prix en conditions réelles : sur le câble SFR, bladeRF sur le
+DVB-C 658 MHz (64-QAM), SNR 26,7 dB à 13,75 Msps (2 éch./symbole) contre
+24,3 dB à 8,78 Msps (1,28), 0 erreur dans les deux cas (multiplex voisins à
+±8 MHz). C'est pourquoi le démon ne descend que si la carte ou le bus
+l'impose. Essai de la mécanique le 6/11/2026 avec une carte voisine simulée
+sur le bus du bladeRF : réglage à 12,5 Msps au lieu de 13,75 quand elle
+occupait 300 Mo/s, et redescente de 13,75 à 12,5 Msps en cours de lecture
+tvheadend quand elle en demandait 300.
 
 ### Multicanal : plusieurs adaptateurs sur un seul B210
 
