@@ -1,0 +1,102 @@
+.\" dvbrx-web(8) : page web de supervision de dvbrx
+.TH DVBRX-WEB 8 2026-11-06 "dvbrx 0.1" "Manuel de dvbrx"
+.SH NOM
+dvbrx-web \- interface web de supervision des récepteurs dvbrx
+.SH SYNOPSIS
+.SY dvbrx\-web
+.RB [ \-\-config
+.IR FICHIER ]
+.RB [ \-\-listen
+.IR ADRESSE ]
+.RB [ \-\-port
+.IR PORT ]
+.RB [ \-\-socket
+.RI [ NOM =] CHEMIN ]...\&
+.RB [ \-\-data\-dir
+.IR RÉPERTOIRE ]
+.YS
+.SY dvbrx\-web
+.BR \-h " | " \-\-help
+.YS
+.SH DESCRIPTION
+.B dvbrx-web
+sert une page web (port 8099 par défaut) qui parle aux démons
+.BR dvbrx (8)
+par leurs sockets de contrôle. Onglets :
+.TP
+.B Statut
+la radio (carte et numéro de série, fréquence, filtre, débit, gain, AGC,
+niveau, puissance estimée, débordements, LNB) et, par adaptateur, les
+paramètres du canal reçu (norme, modulation, rendement, SNR, débit TS,
+erreurs).
+.TP
+.B Constellation
+le nuage de points du canal reçu.
+.TP
+.B Scan rapide
+spectre par FFT et détection des canaux (câble/terrestre, satellite avec les
+quatre combinaisons du LNB universel).
+.TP
+.B Scan complet
+identification de la norme et sondage de chaque canal ; export au format
+dvbv5 pour tvheadend.
+.TP
+.B Alignement
+suivi d'une porteuse satellite ou d'un multiplex DVB-T/T2 : puissance, SNR,
+verrouillage, historique, son facultatif.
+.PP
+Le statut et la constellation ne prennent pas la radio. Le scan et
+l'alignement la prennent : quand une application (tvheadend) l'utilise,
+dvbrx répond
+.B busy
+et la page propose de forcer, ce qui interrompt l'accord en cours.
+.PP
+Avec plusieurs récepteurs, un sélecteur en haut de la page les présente avec
+leur carte (« dvbrx 1 \(em HackRF One 334c64dc39395367 ») ; scans et
+alignement se font récepteur par récepteur.
+.PP
+Il n'y a pas d'authentification : n'exposer la page qu'au réseau local, ou
+l'écouter sur 127.0.0.1 derrière un mandataire qui authentifie.
+.SH OPTIONS
+.TP
+.BR \-c ", " \-\-config " \fIFICHIER\fR"
+Configuration au format INI (exemple commenté :
+.IR /etc/dvbrxd/web.conf ).
+.TP
+.BI \-\-listen " ADRESSE"
+Adresse d'écoute (défaut 0.0.0.0).
+.TP
+.BR \-p ", " \-\-port " \fIPORT\fR"
+Port HTTP (défaut 8099).
+.TP
+.BR \-s ", " \-\-socket " [\fINOM\fR=]\fICHEMIN\fR"
+Socket d'un démon dvbrx (option répétable). Sans
+.B \-\-socket
+ni
+.B sockets
+dans la configuration : tous les
+.I /run/dvbrx/dvbrx\-*.sock
+présents au démarrage.
+.TP
+.BI \-\-data\-dir " RÉPERTOIRE"
+Résultats de scan (défaut
+.IR /var/lib/dvbrx\-web ).
+.TP
+.BR \-h ", " \-\-help
+Aide.
+.SH FICHIERS
+.TP
+.B /etc/dvbrxd/web.conf
+Configuration : sockets, LNB, entrées, plages et seuils de scan.
+.TP
+.B /var/lib/dvbrx-web
+Derniers scans rapide et complet de chaque récepteur.
+.TP
+.B dvbrx-web.service
+Service systemd, installé mais pas activé :
+.BR "systemctl enable \-\-now dvbrx\-web" .
+.SH VOIR AUSSI
+.BR dvbrx (8),
+.BR tvheadend (1)
+.PP
+apps/dvbrx-web/README.md, doc/dvbrx-web-api.md

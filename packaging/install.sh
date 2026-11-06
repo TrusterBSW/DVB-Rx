@@ -20,6 +20,7 @@ if [ "$1" = "--web" ]; then
     install -m 0644 apps/dvbrx-web/static/* /usr/local/lib/dvbrx-web/static/
     ln -sf ../lib/dvbrx-web/dvbrx-web /usr/local/bin/dvbrx-web
     install -D -m 0644 apps/dvbrx-web/README.md /usr/local/share/doc/dvbrx/dvbrx-web.md
+    install -D -m 0644 doc/man/dvbrx-web.8 /usr/local/share/man/man8/dvbrx-web.8
     install -D -m 0644 doc/dvbrx-web-api.md /usr/local/share/doc/dvbrx/dvbrx-web-api.md
     install -d /etc/dvbrxd
     [ -f /etc/dvbrxd/web.conf ] || install -m 0644 packaging/dvbrx-web.conf.example /etc/dvbrxd/web.conf
@@ -40,6 +41,8 @@ install -D -m 0755 packaging/dvbrx-irq-pin /usr/local/sbin/dvbrx-irq-pin
 install -D -m 0644 packaging/dvbrxd-cpu.conf.example /usr/local/share/doc/dvbrx/dvbrxd-cpu.conf.example
 install -D -m 0644 README.md /usr/local/share/doc/dvbrx/README.md
 install -D -m 0644 doc/lnb-protocol.md /usr/local/share/doc/dvbrx/lnb-protocol.md
+install -D -m 0644 doc/dvbrx-web-api.md /usr/local/share/doc/dvbrx/dvbrx-web-api.md
+install -D -m 0644 doc/man/dvbrx.8 /usr/local/share/man/man8/dvbrx.8
 
 # kernel module, rebuilt by DKMS for new kernels
 rm -rf /usr/src/dvbrx-$VERSION

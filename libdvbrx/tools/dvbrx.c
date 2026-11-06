@@ -1,6 +1,6 @@
 /*
  * dvbrx: real-time DVB receiver (S/S2/S2X, C, T, T2) for an SDR (USRP through
- * UHD, bladeRF through libbladeRF; see tools/sdr.h) or an IQ file; runs as the
+ * UHD, bladeRF, HackRF; see tools/sdr.h) or an IQ file; runs as the
  * dvbrxd@N service in DVB bridge mode.
  *
  * Standalone:  dvbrx (-u ARGS -f FREQ | -F FILE) -s SYMRATE [-o DEST] ...
@@ -10,7 +10,7 @@
  *   rate, ISI, PLS gold code), the transport stream goes to the adapter's
  *   demux, LNB commands go to the LNB controller (-L).
  *
- * Options:
+ * Options (the user's version: dvbrx --help, man dvbrx, doc/man/dvbrx.8):
  *   -u ARGS     SDR: "[DRIVER:]ARGS", DRIVER "uhd" (default; ARGS e.g.
  *               "type=b200"), "bladerf" (ARGS: libbladeRF device string,
  *               "" for the first one) or "hackrf" (ARGS: serial number, ""
@@ -20,7 +20,7 @@
  *   -f HZ       centre frequency (standalone)
  *   -s SYMRATE  symbol rate (standalone)
  *   -S RATE     sample rate (standalone, default 2 x symbol rate); bridge
- *               mode: maximum sample rate (default 56e6)
+ *               mode: maximum sample rate (default: the SDR's)
  *   -G DB       receive gain (default 40), or "auto": first kept for a mean
  *               input level of -24 dBFS (lowered at once if the ADC clips),
  *               then, once the receiver locks, moved in 3 dB steps to the
@@ -2266,15 +2266,81 @@ static int run_multi(struct radio* radio, char** specs, int n, double centre, do
     return 0;
 }
 
-static void usage(const char* prog)
+static void usage_to(FILE* f, const char* prog)
 {
-    fprintf(stderr,
+    fprintf(f,
             "usage: %s (-u [DRIVER:]ARGS -f FREQ | -F FILE) -s SYMRATE [-S RATE] [-G GAIN] [-A ANT] "
             "[-M MCR] [-r ROLLOFF] [-D SYMBOLS] [-g GOLD] [-i ISI] [-l DVBS_RATE] [-c QAM] [-T MHZ] [-2 MHZ] [-o DEST] "
             "[-t THREADS] [-R]\n"
-            "       %s -d N (-u [DRIVER:]ARGS | -F FILE) [-S MAX_RATE] [-G GAIN] [-A ANT] [-M MCR] "
-            "[-L LNB] [-t THREADS]\n",
-            prog, prog);
+            "       %s (-u [DRIVER:]ARGS | -F FILE) -S RATE -m CHANNEL [-m CHANNEL]... [-f FREQ]\n"
+            "       %s -d N [-n ADAPTERS [-W RATE]] (-u [DRIVER:]ARGS | -F FILE) [-S MAX_RATE] [-G GAIN] "
+            "[-A ANT] [-M MCR] [-L LNB] [-C PATH] [-t THREADS]\n"
+            "       %s -h | --help\n",
+            prog, prog, prog, prog);
+}
+
+static void usage(const char* prog)
+{
+    usage_to(stderr, prog);
+}
+
+static void help(const char* prog)
+{
+    usage_to(stdout, prog);
+    fputs("\n"
+          "Récepteur DVB temps réel (DVB-S, S2, S2X, C, T, T2) sur radio logicielle (USRP B2xx,\n"
+          "bladeRF, HackRF) ou fichier IQ. En mode pont (-d), sert /dev/dvb/adapterN par le\n"
+          "module noyau dvbrx (service dvbrxd@N). Voir dvbrx(8).\n"
+          "\n"
+          "Radio\n"
+          "  -u [PILOTE:]ARGS  radio : uhd (défaut ; ARGS UHD, ex. type=b200,serial=31A5B7C),\n"
+          "                    bladerf (chaîne libbladeRF, ex. *:serial=0a0896e9...) ou\n"
+          "                    hackrf (numéro de série ou sa fin ; 20 Msps au plus) ;\n"
+          "                    ARGS vide : la première carte trouvée\n"
+          "  -F FICHIER        fichier IQ fc32 au lieu d'une radio (mode pont : rejoué en boucle)\n"
+          "  -G DB|auto[:MAX]  gain (défaut 40) ; auto : -24 dBFS, baissé si l'ADC écrête, puis\n"
+          "                    ajusté au meilleur SNR une fois verrouillé ; MAX : plafond\n"
+          "  -A ENTRÉE         UHD TX/RX ou RX2, bladeRF RX1 (défaut) ou RX2 ; HackRF : une seule\n"
+          "  -B HZ             filtre analogique (défaut : largeur du canal + 15 %%, 0 : celui d'UHD)\n"
+          "  -M HZ             horloge maître (UHD)\n"
+          "  -S HZ             débit d'échantillonnage (défaut 2 x débit symbole ; OFDM 1,12 x le\n"
+          "                    débit élémentaire) ; mode pont : débit maximal (défaut : celui\n"
+          "                    de la radio)\n"
+          "\n"
+          "Canal (mode autonome ; DVB-S2 par défaut)\n"
+          "  -f HZ             fréquence centrale (FI après LNB en satellite)\n"
+          "  -s SYM/S          débit symbole\n"
+          "  -r ROLLOFF        roll-off (défaut 0,2)\n"
+          "  -g GOLD           gold code PLS (défaut 0 ; rN : code racine)\n"
+          "  -i ISI            flux d'entrée (défaut : tous, en UDP sur PORT + ISI) ; T2 : PLP\n"
+          "  -l RENDEMENT      DVB-S : auto, 1/2, 2/3, 3/4, 5/6 ou 7/8\n"
+          "  -c QAM            DVB-C : auto, 16, 32, 64, 128 ou 256\n"
+          "  -T MHZ            DVB-T, largeur du canal (5, 6, 7 ou 8 ; pas de -s)\n"
+          "  -2 MHZ            DVB-T2, largeur du canal (-i : PLP)\n"
+          "  -x HZ             canal décalé de HZ dans une capture à -S\n"
+          "  -D SYMBOLES       demi-longueur du filtre adapté (défaut : selon le roll-off)\n"
+          "  -o DEST           sortie TS : - (défaut), un fichier ou udp://HÔTE:PORT\n"
+          "  -R                fichier : lu à la cadence réelle, en boucle\n"
+          "\n"
+          "Plusieurs multiplex d'une capture (mode autonome)\n"
+          "  -m CANAL          répétable ; clés séparées par des virgules : f (Hz), sys (s, s2,\n"
+          "                    c, t, t2), sr, bw (MHz), ro, qam, fec, isi/plp, gold, o (sortie) ;\n"
+          "                    ex. -m f=646e6,sys=t2,bw=8,o=udp://127.0.0.1:1234\n"
+          "\n"
+          "Mode pont /dev/dvb\n"
+          "  -d N              sert /dev/dvbrxN, donc /dev/dvb/adapterN\n"
+          "  -n NOMBRE         adaptateurs N, N+1... servis par une seule capture large bande\n"
+          "  -W HZ             débit de cette capture (défaut 30,72e6)\n"
+          "  -L LNB            contrôleur LNB : none (défaut), serial:/dev/ttyACM0 ou\n"
+          "                    udp:HÔTE:PORT\n"
+          "  -C CHEMIN         socket de contrôle de dvbrx-web (défaut /run/dvbrx/dvbrx-N.sock,\n"
+          "                    \"\" : aucun)\n"
+          "  -P DB             puissance d'entrée estimée : dBm à 0 dBFS et 0 dB de gain (défaut 0)\n"
+          "\n"
+          "Commun\n"
+          "  -t N              threads LDPC (défaut 2)\n"
+          "  -h, --help        cette aide\n",
+          stdout);
 }
 
 int main(int argc, char** argv)
@@ -2293,8 +2359,14 @@ int main(int argc, char** argv)
     char* multi[MAX_MULTI];
     int nmulti = 0;
     int opt;
-    while ((opt = getopt(argc, argv, "u:F:f:S:G:A:B:C:P:M:s:r:D:g:i:o:t:Rd:L:l:c:T:2:n:W:x:m:")) != -1) {
+    for (int i = 1; i < argc; i++)
+        if (!strcmp(argv[i], "--help")) {
+            help(argv[0]);
+            return 0;
+        }
+    while ((opt = getopt(argc, argv, "hu:F:f:S:G:A:B:C:P:M:s:r:D:g:i:o:t:Rd:L:l:c:T:2:n:W:x:m:")) != -1) {
         switch (opt) {
+        case 'h': help(argv[0]); return 0;
         case 'u': dev_spec = optarg; break;
         case 'F': radio.file = optarg; break;
         case 'f': freq = atof(optarg); break;

@@ -1,6 +1,7 @@
 # dvbrx-web
 
-Interface web de supervision du récepteur SDR DVB **dvbrx** (USRP B210 exposé en `/dev/dvb`).
+Interface web de supervision du récepteur SDR DVB **dvbrx** (B210, bladeRF ou HackRF exposé en
+`/dev/dvb`). Résumé : `man dvbrx-web`, `dvbrx-web --help`.
 Elle parle à dvbrx par son socket de contrôle (`/run/dvbrx/dvbrx-N.sock`, protocole décrit dans
 `doc/dvbrx-web-api.md`). Python 3 (bibliothèque standard + numpy), page HTML/CSS/JS sans
 dépendance externe ni CDN.
@@ -9,11 +10,15 @@ dépendance externe ni CDN.
 
 | Onglet | Rôle | Prend la radio ? |
 |---|---|---|
-| Statut | radio (fréquence, filtre, débit, gain, AGC, niveau, puissance estimée, débordements, LNB) et, par adaptateur, tous les paramètres du canal (norme, fréquence réelle pour le satellite, modulation, rendement, FFT/IG/PLP, SNR, décalage, débit TS, erreurs) ; rafraîchi chaque seconde | non |
+| Statut | radio (carte et numéro de série, fréquence, filtre, débit, gain, AGC, niveau, puissance estimée, débordements, LNB) et, par adaptateur, tous les paramètres du canal (norme, fréquence réelle pour le satellite, modulation, rendement, FFT/IG/PLP, SNR, décalage, débit TS, erreurs) ; rafraîchi chaque seconde | non |
 | Constellation | nuage de points avec persistance ; demandé toutes les 500 ms seulement si l'onglet est affiché et la page visible | non |
 | Scan rapide | FFT par fenêtres d’environ 50 MHz (48 utiles) (56 MS/s), détection des canaux (grille de 8 MHz pour le câble, porteuses pour le satellite) ; Sat ON = 4 combinaisons du LNB universel (VL, VH, HL, HH), soit 5 lignes | oui |
 | Scan complet | identification de la norme (raie cyclique de \|x\|² → porteuse unique, sinon OFDM) puis `probe` ; DOCSIS reconnu (6,952 MBd sans PAT ni service) ; NIT exploitée ; export dvbv5 | oui |
 | Alignement (satellite ou terrestre) | moniteur sur une porteuse satellite (combinaison du LNB réglable à la main) ou un multiplex DVB-T/T2 (fréquence ou canal UHF, largeur, PLP), grandes jauges (puissance, SNR, verrouillage), historique, son facultatif | oui |
+
+Avec plusieurs récepteurs (un démon `dvbrxd@N` par carte), un sélecteur en haut de page les
+présente avec leur carte (« dvbrx 1 — HackRF One 334c64dc39395367 ») ; scans et alignement se
+font récepteur par récepteur.
 
 Quand tvheadend utilise le récepteur, dvbrx répond `busy` : la page l'explique et propose de
 forcer (l'accord en cours est interrompu).
@@ -21,7 +26,7 @@ forcer (l'accord en cours est interrompu).
 tvheadend garde le frontal ouvert (donc la radio accordée et le décodage actif) après la fin
 d'un visionnage, sauf si l'option **Power save** de ses frontaux dvbrx est cochée
 (Configuration > DVB Inputs > TV adapters). Cochez-la : la radio est libérée quelques
-secondes après la fin d'un visionnage, et le B210 ne décode plus pour rien.
+secondes après la fin d'un visionnage, et la carte ne décode plus pour rien.
 
 ## Lancer
 
@@ -93,8 +98,6 @@ DOCSIS ne sont pas exportés. Pour tvheadend : copier le fichier dans
   protocole du contrôleur de LNB le prévoit déjà (`DISEQC e0 10 38 f0`, cf.
   `doc/lnb-protocol.md`), mais l'API de contrôle de dvbrx ne l'expose pas encore : il faudrait
   par exemple `{"cmd": "diseqc", "bytes": "e01038f0"}`, exclusif comme `lnb`.
-- Liste des PID vus (et débits) dans la réponse de `probe` : identification certaine du DOCSIS
-  (PID 0x1FFE seul), diagnostic des tables.
 - Multi-PLP DVB-T2 et multistream DVB-S2 (ISI) : liste des PLP / ISI dans `probe`, un multiplex
   exporté par PLP / ISI.
 - Envoi direct des multiplex à tvheadend (API JSON) au lieu de l'export de fichiers.

@@ -1,0 +1,388 @@
+.\" dvbrx(8) : récepteur DVB sur radio logicielle
+.TH DVBRX 8 2026-11-06 "dvbrx 0.1" "Manuel de dvbrx"
+.SH NOM
+dvbrx \- récepteur DVB-S/S2/S2X/C/T/T2 temps réel sur radio logicielle, exposé en /dev/dvb
+.SH SYNOPSIS
+.SY dvbrx
+.RB ( \-u
+.RI [ PILOTE :] ARGS
+.B \-f
+.I HZ
+|
+.B \-F
+.IR FICHIER )
+.B \-s
+.I SYM/S
+.RI [ options ]
+.YS
+.SY dvbrx
+.RB ( \-u
+.RI [ PILOTE :] ARGS
+|
+.B \-F
+.IR FICHIER )
+.B \-S
+.I HZ
+.B \-m
+.IR CANAL ...\&
+.RB [ \-f
+.IR HZ ]
+.YS
+.SY dvbrx
+.B \-d
+.I N
+.RB [ \-n
+.I NOMBRE
+.RB [ \-W
+.IR HZ ]]
+.RB ( \-u
+.RI [ PILOTE :] ARGS
+|
+.B \-F
+.IR FICHIER )
+.RI [ options ]
+.YS
+.SY dvbrx
+.BR \-h " | " \-\-help
+.YS
+.SH DESCRIPTION
+.B dvbrx
+démodule et décode en temps réel les normes DVB-S, DVB-S2 (et S2X), DVB-C,
+DVB-T et DVB-T2 à partir d'une radio logicielle (USRP B2xx par UHD, bladeRF,
+HackRF) ou d'un fichier IQ, et produit le flux de transport MPEG-TS.
+.PP
+Il a trois modes :
+.TP
+.B autonome
+un canal, réglé en ligne de commande ; le TS sort sur la sortie standard,
+dans un fichier ou en UDP
+.RB ( \-o ).
+.TP
+.B multicanal
+plusieurs multiplex extraits d'une même capture large bande
+.RB ( \-m
+répété), chacun vers sa sortie.
+.TP
+.B pont /dev/dvb
+.RB ( \-d
+.IR N )
+avec le module noyau
+.BR dvbrx ,
+le démon sert
+.BI /dev/dvb/adapter N
+comme une carte DVB ordinaire : les applications (tvheadend, dvbv5-zap, VLC,
+Kaffeine...) règlent le frontend, dvbrx reçoit ces réglages par
+.BI /dev/dvbrx N\c
+, accorde la radio et renvoie le TS dans le demux. C'est le mode du service
+.BR dvbrxd@ \fIN\fR.
+.SH OPTIONS
+.SS Radio
+.TP
+.BR \-u " [\fIPILOTE\fR:]\fIARGS\fR"
+Radio et carte à ouvrir.
+.I PILOTE
+vaut
+.B uhd
+(défaut ;
+.I ARGS
+d'UHD, par exemple
+.BR type=b200,serial=31A5B7C ),
+.B bladerf
+(chaîne de périphérique de libbladeRF, par exemple
+.BR *:serial=0a0896e9813f43d29e2ff2278014dfb1 )
+ou
+.B hackrf
+(numéro de série, ou sa fin, tel que l'affiche
+.BR hackrf_info ).
+.I ARGS
+vide : la première carte trouvée. Avec plusieurs cartes, toujours donner le
+numéro de série.
+.TP
+.BI \-F " FICHIER"
+Fichier IQ (complexes flottants 32 bits entrelacés) au lieu d'une radio. En
+mode pont, il est rejoué en boucle à la cadence réelle et la fréquence est
+ignorée.
+.TP
+.BR \-G " \fIDB\fR | " auto [: \fIMAX\fR]
+Gain de réception (défaut 40 dB).
+.B auto
+le règle d'abord pour un niveau moyen de \-24 dBFS (et le baisse aussitôt si
+l'ADC écrête), puis, une fois le récepteur verrouillé, le déplace par pas de
+3 dB vers le gain qui donne le meilleur SNR ;
+.I MAX
+le plafonne. Recommandé sur câble et antenne.
+.TP
+.BI \-A " ENTRÉE"
+Entrée de la carte : UHD
+.B TX/RX
+ou
+.BR RX2 ,
+bladeRF
+.B RX1
+(défaut) ou
+.BR RX2 .
+Le HackRF n'en a qu'une ; son alimentation d'antenne reste toujours coupée.
+.TP
+.BI \-B " HZ"
+Largeur du filtre analogique (défaut : largeur occupée du canal + 15 %, ou
+toute la capture en multicanal ; 0 : choix d'UHD).
+.TP
+.BI \-M " HZ"
+Horloge maître (UHD).
+.TP
+.BI \-S " HZ"
+Débit d'échantillonnage. Mode autonome : défaut 2 échantillons par symbole,
+1,12 fois le débit élémentaire en OFDM ; multicanal : débit de la capture.
+Mode pont : débit maximal (défaut : celui de la radio).
+.SS Canal (mode autonome)
+.TP
+.BI \-f " HZ"
+Fréquence centrale ; en satellite, la fréquence intermédiaire après le LNB.
+.TP
+.BI \-s " SYM/S"
+Débit symbole (DVB-S, S2, C).
+.TP
+.BI \-r " ROLLOFF"
+Roll-off (défaut 0,2).
+.TP
+.BI \-g " GOLD"
+Gold code d'embrouillage PL (défaut 0) ;
+.BI r N
+: code racine.
+.TP
+.BI \-i " ISI"
+Flux d'entrée DVB-S2 (défaut : tous ; en UDP, chacun sur PORT + ISI) ; en
+DVB-T2, le PLP.
+.TP
+.BI \-l " RENDEMENT"
+DVB-S (première génération) :
+.BR auto ,
+.BR 1/2 ,
+.BR 2/3 ,
+.BR 3/4 ,
+.B 5/6
+ou
+.BR 7/8 .
+.TP
+.BI \-c " QAM"
+DVB-C :
+.BR auto ,
+16, 32, 64, 128 ou 256 (roll-off 0,15).
+.TP
+.BI \-T " MHZ"
+DVB-T, largeur du canal (5, 6, 7 ou 8 ; pas de
+.BR \-s ).
+.TP
+.BI \-2 " MHZ"
+DVB-T2, largeur du canal ;
+.B \-i
+choisit le PLP.
+.TP
+.BI \-x " HZ"
+Canal décalé de
+.I HZ
+dans une capture à
+.BR \-S .
+.TP
+.BI \-D " SYMBOLES"
+Demi-longueur du filtre adapté (défaut : selon le roll-off).
+.TP
+.BI \-o " DEST"
+Sortie du TS :
+.B \-
+(sortie standard, défaut), un fichier, ou
+.BI udp:// HÔTE : PORT\c
+\&.
+.TP
+.B \-R
+Fichier : lecture à la cadence réelle, en boucle.
+.SS Multicanal
+.TP
+.BI \-m " CANAL"
+Un multiplex de la capture (option répétable). Clés séparées par des
+virgules :
+.B f
+(Hz),
+.B sys
+.RB ( s ,
+.BR s2 ,
+.BR c ,
+.BR t ,
+.BR t2 ),
+.B sr
+(sym/s),
+.B bw
+(MHz),
+.BR ro ,
+.BR qam ,
+.B fec
+(DVB-S),
+.BR isi / plp ,
+.BR gold ,
+.B o
+(sortie). Par exemple
+.BR "\-m f=646e6,sys=t2,bw=8,o=udp://127.0.0.1:1234" .
+.B \-f
+fixe le centre de la capture (défaut : milieu des canaux).
+.SS Mode pont /dev/dvb
+.TP
+.BI \-d " N"
+Sert
+.BI /dev/dvbrx N\c
+, donc
+.BI /dev/dvb/adapter N\c
+\&.
+.TP
+.BI \-n " NOMBRE"
+Sert les adaptateurs
+.IR N ", " N +1...
+avec une seule capture large bande (B210, bladeRF) ; chaque adaptateur a son
+récepteur.
+.TP
+.BI \-W " HZ"
+Débit de cette capture (défaut 30,72e6).
+.TP
+.BI \-L " LNB"
+Contrôleur du LNB (13/18 V, 22 kHz, DiSEqC) :
+.B none
+(défaut),
+.BI serial: PÉRIPHÉRIQUE
+ou
+.BI udp: HÔTE : PORT\c
+\&.
+.TP
+.BI \-C " CHEMIN"
+Socket de contrôle pour
+.BR dvbrx\-web (8)
+(défaut
+.BI /run/dvbrx/dvbrx\- N .sock\c
+;
+.B \(dq\(dq
+: aucun).
+.TP
+.BI \-P " DB"
+Estimation de la puissance d'entrée : dBm à 0 dBFS et 0 dB de gain
+(défaut 0).
+.SS Commun
+.TP
+.BI \-t " N"
+Threads de décodage LDPC (défaut 2).
+.TP
+.BR \-h ", " \-\-help
+Aide.
+.SH CARTES
+.TP
+.B USRP B210 (UHD)
+Jusqu'à 56 Msps (61,44 avec une horloge maître de 61,44 MHz), 70 MHz à
+6 GHz. Avec horodatage : les échantillons perdus sur l'USB sont remplacés par
+des zéros, et les récepteurs gardent leur synchronisation.
+.TP
+.B bladeRF 2.0 micro (libbladeRF)
+Mêmes performances que le B210 (même AD9361). Le FPGA doit correspondre à
+libbladeRF (FPGA 0.15.3 avec libbladeRF 2024.05 ; avec un FPGA plus récent,
+le flux ne livre qu'un quart des échantillons) ; dvbrx affiche sa version
+au démarrage.
+.TP
+.B HackRF One (libhackrf)
+20 Msps au plus, échantillons sur 8 bits, environ 6 à 7 dB moins sensible
+qu'un B210 ; une seule chaîne de réception (pas de
+.BR \-n ,
+.BR \-m ).
+.PP
+Il faut au moins 1,5 échantillon par symbole : un HackRF reçoit au plus
+13,3 Msym/s. Un réglage qui demande plus que la carte ne peut donner est
+refusé (journal : « no usable sample rate »), et le frontend ne se verrouille
+jamais ; l'application constate l'absence de signal.
+.PP
+B210 et bladeRF (AD9361) : entre 138 et 250 MHz, les signaux à trois fois la
+fréquence accordée (414 à 750 MHz) se replient dans la bande ; un filtre
+passe-bas vers 300 MHz devant l'entrée est nécessaire pour cette bande.
+.SH FRONTEND ET TVHEADEND
+Chaque adaptateur a un frontend DVB-S/S2, DVB-C et DVB-T/T2 (un à la fois).
+Au démarrage, le démon ouvre la carte et donne au frontend son nom, avec le
+modèle et le numéro de série :
+.RS
+.EX
+dvbrx B210 31A5B7C
+dvbrx bladeRF 2.0 xA4 0a0896e9813f43d29e2ff2278014dfb1
+dvbrx HackRF One 334c64dc39395367
+.EE
+.RE
+.PP
+tvheadend lit ce nom quand il découvre l'adaptateur et en tire l'identifiant
+de sa configuration : chaque carte garde la sienne. Une nouvelle carte arrive
+avec ses frontends désactivés : les activer et leur associer les réseaux
+(Configuration > DVB Inputs > TV adapters). Le service est
+.B Type=notify
+et ordonné avant tvheadend, pour que le nom soit en place quand tvheadend
+démarre ; une carte changée tvheadend en marche n'apparaît qu'après le
+redémarrage de tvheadend.
+.PP
+Cocher
+.B Power save
+sur les frontends dvbrx : la radio est libérée quelques secondes après la fin
+d'un visionnage. Avec plusieurs cartes, une
+.B priorité
+plus élevée sur la plus sensible la fait choisir en premier.
+.SH PLUSIEURS CARTES
+Un démon par carte, chacun sur son adaptateur :
+.RS
+.EX
+# /etc/modprobe.d/dvbrx.conf
+options dvbrx adapters=2
+# /etc/dvbrxd/0.conf
+DVBRXD_ARGS="\-u bladerf:*:serial=0a0896e9... \-G auto \-t 3"
+# /etc/dvbrxd/1.conf
+DVBRXD_ARGS="\-u hackrf:334c64dc39395367 \-G auto \-t 2"
+
+systemctl enable \-\-now dvbrxd@0 dvbrxd@1
+.EE
+.RE
+.PP
+Les deux reçoivent des multiplex différents en même temps ; chaque carte est
+désignée par son numéro de série, l'ordre de branchement ne compte pas. Le
+coût est celui de deux récepteurs (DVB-T2 ou DVB-S2 : un à deux cœurs
+chacun).
+.SH FICHIERS
+.TP
+.BI /dev/dvbrx N
+Périphérique de contrôle du module, ouvert par le démon (un seul à la fois).
+.TP
+.BI /dev/dvb/adapter N
+L'adaptateur DVB vu par les applications.
+.TP
+.BI /etc/dvbrxd/ N .conf
+Options du service
+.BR dvbrxd@ \fIN\fR
+.RB ( DVBRXD_ARGS ).
+.TP
+.B /etc/modprobe.d/dvbrx.conf
+Nombre d'adaptateurs du module
+.RB ( "options dvbrx adapters=" \fIN\fR,
+1 à 8).
+.TP
+.BI /run/dvbrx/dvbrx\- N .sock
+Socket de contrôle (JSON par ligne : status, constellation, probe, monitor,
+capture, lnb), voir
+.IR doc/dvbrx\-web\-api.md .
+.SH EXEMPLES
+.EX
+# satellite : FI 1210 MHz, 27,5 Msym/s, vers mpv
+dvbrx \-u type=b200 \-f 1210e6 \-s 27.5e6 \-o udp://127.0.0.1:1234
+# DVB-T2 8 MHz à 586 MHz sur un bladeRF, PLP 0
+dvbrx \-u bladerf: \-f 586e6 \-2 8 \-i 0 \-G auto \-o t2.ts
+# deux multiplex d'une capture de 30,72 Msps
+dvbrx \-u type=b200 \-G auto \-S 30.72e6 \e
+    \-m f=646e6,sys=t2,bw=8,o=udp://127.0.0.1:1234 \e
+    \-m f=655e6,sys=c,sr=6.9e6,qam=64,o=udp://127.0.0.1:1235
+# pont /dev/dvb à la main, avec le contrôleur de LNB
+sudo dvbrx \-d 0 \-u type=b200 \-G auto \-L serial:/dev/ttyACM0
+.EE
+.SH VOIR AUSSI
+.BR dvbrx\-web (8),
+.BR tvheadend (1),
+.BR dvbv5\-zap (1),
+.BR hackrf_info (1),
+.BR uhd_find_devices (1)
+.PP
+README.md, doc/dvbrx-web-api.md, doc/lnb-protocol.md

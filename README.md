@@ -1,7 +1,14 @@
 # dvbrx
 
-Réception DVB temps réel avec un USRP B210, exposée comme un adaptateur
-standard `/dev/dvb` : DVB-S, DVB-S2, DVB-S2X, DVB-C, DVB-T et DVB-T2. Contrôle LNB (13/18 V, 22 kHz, DiSEqC) déporté sur un ESP32.
+Réception DVB temps réel sur radio logicielle (USRP B210, bladeRF 2.0,
+HackRF One), exposée comme un adaptateur standard `/dev/dvb` : DVB-S,
+DVB-S2, DVB-S2X, DVB-C, DVB-T et DVB-T2. Contrôle LNB (13/18 V, 22 kHz,
+DiSEqC) déporté sur un ESP32. Supervision, scan et alignement par une page
+web (`apps/dvbrx-web`).
+
+Documentation : `dvbrx --help`, `man dvbrx` et `man dvbrx-web` (sources
+dans `doc/man/`, installées par `packaging/install.sh`), ce README,
+`doc/dvbrx-web-api.md` (socket de contrôle), `doc/lnb-protocol.md`.
 
 ## Mise en place
 
@@ -17,7 +24,9 @@ standard `/dev/dvb` : DVB-S, DVB-S2, DVB-S2X, DVB-C, DVB-T et DVB-T2. Contrôle 
     cmake -S gr-dvbrx -B gr-dvbrx/build && cmake --build gr-dvbrx/build   # bloc GNU Radio
 
 Dépendances système : gnuradio (+ gnuradio-dev sur Debian), libuhd, FFTW
-(libfftw3-dev, simple précision), pybind11, tsduck, ffmpeg.
+(libfftw3-dev, simple précision), pybind11, tsduck, ffmpeg. Pour `dvbrx`
+seul : FFTW et, selon les cartes voulues, libuhd-dev, libbladerf-dev,
+libhackrf-dev (chaque pilote est compilé si son en-tête est présent).
 
 ## Organisation
 
@@ -65,7 +74,9 @@ Dépendances système : gnuradio (+ gnuradio-dev sur Debian), libuhd, FFTW
   - `gen/` : générateurs des tables (FEC, LDPC, et constellations /
     entrelacement / codes PLS mesurés sur l'émetteur gr-dtv, sources dans
     `third_party/gnuradio-dtv`) ;
-  - `tools/dvbrx.c` : le récepteur (démon `dvbrxd@N` en mode pont) (USRP via l'API C d'UHD, ou fichier IQ).
+  - `tools/dvbrx.c` : le récepteur (démon `dvbrxd@N` en mode pont) ;
+    `tools/sdr_uhd.c`, `sdr_bladerf.c`, `sdr_hackrf.c` : les pilotes de
+    cartes (USRP par l'API C d'UHD, libbladeRF, libhackrf), ou fichier IQ.
 - `gr-dvbrx/`, `apps/dvbrx-dvbs2-rx` : étape intermédiaire (front-end C dans
   la chaîne GNU Radio gr-dvbs2rx).
 - `tests/` : vecteurs de référence (émetteur gr-dtv) et tests par étage.
@@ -145,6 +156,45 @@ Le module noyau `kernel/dvbrx` crée des adaptateurs DVB-S/S2 classiques
   que donne le lien HackRF → B210 à 1,25 GHz, ~12-16 dB), et sur fichier
   pour 64APSK 128/180 ; les 55 MODCOD S2X émis par dvbtx (radio nulle)
   sont décodés sans erreur.
+
+### Cartes
+
+| | USRP B210 | bladeRF 2.0 micro | HackRF One |
+|---|---|---|---|
+| `-u` | `uhd:serial=…` (ou `type=b200`) | `bladerf:*:serial=…` | `hackrf:NUMÉRO` |
+| Débit max | 56 Msps (61,44) | 61,44 Msps | 20 Msps |
+| Débit symbole max (1,5 éch./symbole) | ~37-40 Msym/s | ~40 Msym/s | 13,3 Msym/s |
+| Sensibilité (câble SFR, 5/11/2026) | référence | ≈ B210 (±1,5 dB) | 6-7 dB de moins |
+| Horodatage (trous comblés) | oui | oui (FPGA ≤ 0.15) | non |
+| Multicanal (`-n`, `-m`) | oui | oui | non |
+
+- bladeRF : le FPGA doit aller avec libbladeRF (0.15.3 avec libbladeRF
+  2024.05 ; un FPGA 0.16 ne livre qu'un quart des échantillons) ; la version
+  est affichée au démarrage. Règle udev dans `packaging/60-dvbrx.rules`.
+- B210 et bladeRF (AD9361) : entre 138 et 250 MHz, les signaux à trois fois
+  la fréquence accordée se replient dans la bande (filtre passe-bas ~300 MHz
+  nécessaire).
+- HackRF : un réglage plus large que ce qu'il peut recevoir (DVB-S à
+  22 000 ou 27 500 kBd) est refusé (« no usable sample rate » dans le
+  journal) : le frontend ne se verrouille pas et l'application constate
+  l'absence de signal. Lui donner une priorité plus basse dans tvheadend.
+
+### Plusieurs cartes en même temps
+
+Un démon par carte, chacun sur son adaptateur, chaque carte désignée par
+son numéro de série (l'ordre de branchement ne compte pas) :
+
+    # /etc/modprobe.d/dvbrx.conf : options dvbrx adapters=2
+    # /etc/dvbrxd/0.conf : DVBRXD_ARGS="-u bladerf:*:serial=0a0896e9… -G auto -t 3"
+    # /etc/dvbrxd/1.conf : DVBRXD_ARGS="-u hackrf:334c64dc39395367 -G auto -t 2"
+    sudo systemctl enable --now dvbrxd@0 dvbrxd@1
+
+tvheadend voit deux adaptateurs nommés d'après leur carte et peut recevoir
+deux multiplex à la fois ; dvbrx-web trouve les deux sockets et les présente
+avec leur carte. Essai du 6/11/2026 (bladeRF + HackRF, câble SFR, via
+tvheadend) : DVB-T 554 MHz sur le bladeRF sans erreur pendant que le HackRF
+recevait le DVB-C 602 MHz (QAM64, SNR 24,8 dB, 3 % de blocs en erreur : le
+HackRF est à la limite sur ce câble) ; aucun débordement.
 
 ### Multicanal : plusieurs adaptateurs sur un seul B210
 
@@ -292,8 +342,8 @@ avec dvbtx, ainsi que 32K PP8 19/128 et 16K PP2 étendus : 0 erreur.
 ## Pistes futures
 
 Voir `doc/A_FAIRE.md` : robustesse (resynchronisation DVB-S, égaliseur sans
-pilotes), support du BladeRF et du HackRF, contrôle LNB par ESP32, et les pistes
-d'optimisation de `doc/optimisation/`.
+pilotes, accrochage DVB-T), DVB-S sur bladeRF et HackRF à mesurer, et les
+pistes d'optimisation de `doc/optimisation/`.
 
 ## Optimisation CPU (3/11/2026)
 
