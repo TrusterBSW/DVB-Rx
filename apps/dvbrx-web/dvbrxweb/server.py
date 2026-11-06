@@ -296,13 +296,14 @@ class Handler(BaseHTTPRequestHandler):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="dvbrx-web",
-                                 description="Interface web de supervision du récepteur dvbrx.")
-    ap.add_argument("--config", "-c", help="fichier de configuration (INI), ex. /etc/dvbrxd/web.conf")
-    ap.add_argument("--listen", help="adresse d'écoute (défaut : 0.0.0.0)")
-    ap.add_argument("--port", "-p", type=int, help="port HTTP (défaut : 8099)")
+                                 description="Web supervision page of the dvbrx receiver.")
+    ap.add_argument("--config", "-c", help="configuration file (INI), e.g. /etc/dvbrxd/web.conf")
+    ap.add_argument("--listen", help="listening address (default 0.0.0.0)")
+    ap.add_argument("--port", "-p", type=int, help="HTTP port (default 8099)")
     ap.add_argument("--socket", "-s", action="append",
-                    help="socket de dvbrx, « chemin » ou « nom=chemin » (répétable)")
-    ap.add_argument("--data-dir", help="répertoire des résultats de scan")
+                    help="dvbrx control socket, PATH or NAME=PATH (repeatable)")
+    ap.add_argument("--data-dir", help="directory of the scan results")
+    ap.add_argument("--version", action="version", version=f"dvbrx-web {VERSION}")
     a = ap.parse_args(argv)
 
     cfg = Config(a.config)

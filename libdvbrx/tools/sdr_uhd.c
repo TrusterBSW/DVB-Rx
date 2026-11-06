@@ -4,6 +4,76 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <uhd.h>
+#include "sdr_dl.h"
+
+/* the library's functions, loaded at the first open (sdr_dl.h) */
+#define UHD_SYMS(X) \
+    X(uhd_meta_range_free) \
+    X(uhd_meta_range_make) \
+    X(uhd_meta_range_stop) \
+    X(uhd_rx_metadata_error_code) \
+    X(uhd_rx_metadata_free) \
+    X(uhd_rx_metadata_has_time_spec) \
+    X(uhd_rx_metadata_make) \
+    X(uhd_rx_metadata_time_spec) \
+    X(uhd_rx_streamer_free) \
+    X(uhd_rx_streamer_issue_stream_cmd) \
+    X(uhd_rx_streamer_make) \
+    X(uhd_rx_streamer_max_num_samps) \
+    X(uhd_rx_streamer_recv) \
+    X(uhd_usrp_free) \
+    X(uhd_usrp_get_rx_bandwidth) \
+    X(uhd_usrp_get_rx_gain) \
+    X(uhd_usrp_get_rx_gain_range) \
+    X(uhd_usrp_get_rx_info) \
+    X(uhd_usrp_get_rx_rate) \
+    X(uhd_usrp_get_rx_stream) \
+    X(uhd_usrp_make) \
+    X(uhd_usrp_rx_info_free) \
+    X(uhd_usrp_set_master_clock_rate) \
+    X(uhd_usrp_set_rx_agc) \
+    X(uhd_usrp_set_rx_antenna) \
+    X(uhd_usrp_set_rx_bandwidth) \
+    X(uhd_usrp_set_rx_freq) \
+    X(uhd_usrp_set_rx_gain) \
+    X(uhd_usrp_set_rx_rate)
+UHD_SYMS(DL_PTR)
+
+static int uhd_load(void)
+{
+    static const char* const names[] = { "libuhd.so.4*", "libuhd.so", NULL };
+    DL_LOAD(names, "UHD", UHD_SYMS, "install uhd-host or libuhd4.x")
+}
+
+#define uhd_meta_range_free (*dl_uhd_meta_range_free)
+#define uhd_meta_range_make (*dl_uhd_meta_range_make)
+#define uhd_meta_range_stop (*dl_uhd_meta_range_stop)
+#define uhd_rx_metadata_error_code (*dl_uhd_rx_metadata_error_code)
+#define uhd_rx_metadata_free (*dl_uhd_rx_metadata_free)
+#define uhd_rx_metadata_has_time_spec (*dl_uhd_rx_metadata_has_time_spec)
+#define uhd_rx_metadata_make (*dl_uhd_rx_metadata_make)
+#define uhd_rx_metadata_time_spec (*dl_uhd_rx_metadata_time_spec)
+#define uhd_rx_streamer_free (*dl_uhd_rx_streamer_free)
+#define uhd_rx_streamer_issue_stream_cmd (*dl_uhd_rx_streamer_issue_stream_cmd)
+#define uhd_rx_streamer_make (*dl_uhd_rx_streamer_make)
+#define uhd_rx_streamer_max_num_samps (*dl_uhd_rx_streamer_max_num_samps)
+#define uhd_rx_streamer_recv (*dl_uhd_rx_streamer_recv)
+#define uhd_usrp_free (*dl_uhd_usrp_free)
+#define uhd_usrp_get_rx_bandwidth (*dl_uhd_usrp_get_rx_bandwidth)
+#define uhd_usrp_get_rx_gain (*dl_uhd_usrp_get_rx_gain)
+#define uhd_usrp_get_rx_gain_range (*dl_uhd_usrp_get_rx_gain_range)
+#define uhd_usrp_get_rx_info (*dl_uhd_usrp_get_rx_info)
+#define uhd_usrp_get_rx_rate (*dl_uhd_usrp_get_rx_rate)
+#define uhd_usrp_get_rx_stream (*dl_uhd_usrp_get_rx_stream)
+#define uhd_usrp_make (*dl_uhd_usrp_make)
+#define uhd_usrp_rx_info_free (*dl_uhd_usrp_rx_info_free)
+#define uhd_usrp_set_master_clock_rate (*dl_uhd_usrp_set_master_clock_rate)
+#define uhd_usrp_set_rx_agc (*dl_uhd_usrp_set_rx_agc)
+#define uhd_usrp_set_rx_antenna (*dl_uhd_usrp_set_rx_antenna)
+#define uhd_usrp_set_rx_bandwidth (*dl_uhd_usrp_set_rx_bandwidth)
+#define uhd_usrp_set_rx_freq (*dl_uhd_usrp_set_rx_freq)
+#define uhd_usrp_set_rx_gain (*dl_uhd_usrp_set_rx_gain)
+#define uhd_usrp_set_rx_rate (*dl_uhd_usrp_set_rx_rate)
 
 struct sdr {
     uhd_usrp_handle usrp;
@@ -27,6 +97,8 @@ static void uhd_close(struct sdr* s)
 
 static struct sdr* uhd_open(const char* args, double mcr, struct sdr_info* info)
 {
+    if (uhd_load())
+        return NULL;
     struct sdr* s = calloc(1, sizeof(*s));
     if (!s)
         return NULL;

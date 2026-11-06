@@ -13,6 +13,62 @@
 #include "sdr.h"
 
 #include <libbladeRF.h>
+#include "sdr_dl.h"
+
+/* the library's functions, loaded at the first open (sdr_dl.h) */
+#define BLADERF_SYMS(X) \
+    X(bladerf_close) \
+    X(bladerf_enable_module) \
+    X(bladerf_fpga_version) \
+    X(bladerf_get_bandwidth) \
+    X(bladerf_get_bandwidth_range) \
+    X(bladerf_get_board_name) \
+    X(bladerf_get_fpga_size) \
+    X(bladerf_get_frequency) \
+    X(bladerf_get_gain) \
+    X(bladerf_get_gain_range) \
+    X(bladerf_get_sample_rate) \
+    X(bladerf_get_sample_rate_range) \
+    X(bladerf_get_serial_struct) \
+    X(bladerf_open) \
+    X(bladerf_set_bandwidth) \
+    X(bladerf_set_frequency) \
+    X(bladerf_set_gain) \
+    X(bladerf_set_gain_mode) \
+    X(bladerf_set_rational_sample_rate) \
+    X(bladerf_strerror) \
+    X(bladerf_sync_config) \
+    X(bladerf_sync_rx)
+BLADERF_SYMS(DL_PTR)
+
+static int brf_load(void)
+{
+    static const char* const names[] = { "libbladeRF.so.2", "libbladeRF.so", NULL };
+    DL_LOAD(names, "bladeRF", BLADERF_SYMS, "install libbladerf2")
+}
+
+#define bladerf_close (*dl_bladerf_close)
+#define bladerf_enable_module (*dl_bladerf_enable_module)
+#define bladerf_fpga_version (*dl_bladerf_fpga_version)
+#define bladerf_get_bandwidth (*dl_bladerf_get_bandwidth)
+#define bladerf_get_bandwidth_range (*dl_bladerf_get_bandwidth_range)
+#define bladerf_get_board_name (*dl_bladerf_get_board_name)
+#define bladerf_get_fpga_size (*dl_bladerf_get_fpga_size)
+#define bladerf_get_frequency (*dl_bladerf_get_frequency)
+#define bladerf_get_gain (*dl_bladerf_get_gain)
+#define bladerf_get_gain_range (*dl_bladerf_get_gain_range)
+#define bladerf_get_sample_rate (*dl_bladerf_get_sample_rate)
+#define bladerf_get_sample_rate_range (*dl_bladerf_get_sample_rate_range)
+#define bladerf_get_serial_struct (*dl_bladerf_get_serial_struct)
+#define bladerf_open (*dl_bladerf_open)
+#define bladerf_set_bandwidth (*dl_bladerf_set_bandwidth)
+#define bladerf_set_frequency (*dl_bladerf_set_frequency)
+#define bladerf_set_gain (*dl_bladerf_set_gain)
+#define bladerf_set_gain_mode (*dl_bladerf_set_gain_mode)
+#define bladerf_set_rational_sample_rate (*dl_bladerf_set_rational_sample_rate)
+#define bladerf_strerror (*dl_bladerf_strerror)
+#define bladerf_sync_config (*dl_bladerf_sync_config)
+#define bladerf_sync_rx (*dl_bladerf_sync_rx)
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -90,6 +146,8 @@ static double brf_set_bandwidth(struct sdr* s, double bw)
 
 static struct sdr* brf_open(const char* args, double mcr, struct sdr_info* info)
 {
+    if (brf_load())
+        return NULL;
     (void)mcr;
     struct sdr* s = calloc(1, sizeof(*s));
     if (!s)

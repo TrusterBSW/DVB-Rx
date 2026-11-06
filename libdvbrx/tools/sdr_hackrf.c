@@ -15,6 +15,91 @@
 #include "sdr.h"
 
 #include <libhackrf/hackrf.h>
+#include "sdr_dl.h"
+
+/* hackrf_get_m0_state (libhackrf 2022.09 and later, HackRF firmware with
+ * API 1.07): the HackRF's own count of overruns. Optional: looked for at
+ * run time, and declared here when the build's libhackrf is older (Ubuntu
+ * 22.04). The structure is libhackrf's. */
+#ifndef HACKRF_HAVE_M0_STATE
+typedef struct {
+    uint16_t requested_mode;
+    uint16_t request_flag;
+    uint32_t active_mode;
+    uint32_t m0_count;
+    uint32_t m4_count;
+    uint32_t num_shortfalls;
+    uint32_t longest_shortfall;
+    uint32_t shortfall_limit;
+    uint32_t threshold;
+    uint32_t next_mode;
+    uint32_t error;
+} hackrf_m0_state;
+#endif
+static int (*dl_m0_state)(hackrf_device*, hackrf_m0_state*);
+
+/* the library's functions, loaded at the first open (sdr_dl.h) */
+#define HACKRF_SYMS(X) \
+    X(hackrf_board_id_name) \
+    X(hackrf_board_id_read) \
+    X(hackrf_board_partid_serialno_read) \
+    X(hackrf_close) \
+    X(hackrf_error_name) \
+    X(hackrf_exit) \
+    X(hackrf_init) \
+    X(hackrf_open) \
+    X(hackrf_open_by_serial) \
+    X(hackrf_set_amp_enable) \
+    X(hackrf_set_antenna_enable) \
+    X(hackrf_set_baseband_filter_bandwidth) \
+    X(hackrf_set_freq) \
+    X(hackrf_set_lna_gain) \
+    X(hackrf_set_sample_rate) \
+    X(hackrf_set_vga_gain) \
+    X(hackrf_start_rx) \
+    X(hackrf_stop_rx)
+HACKRF_SYMS(DL_PTR)
+
+static int hrf_load_required(void)
+{
+    static const char* const names[] = { "libhackrf.so.0", "libhackrf.so", NULL };
+    DL_LOAD(names, "HackRF", HACKRF_SYMS, "install libhackrf0")
+}
+
+static int hrf_load(void)
+{
+    if (hrf_load_required())
+        return -1;
+    static int once;
+    if (!once) {
+        once = 1;
+        void* h = dlopen("libhackrf.so.0", RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD);
+        if (!h)
+            h = dlopen("libhackrf.so", RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD);
+        if (h)
+            *(void**)&dl_m0_state = dlsym(h, "hackrf_get_m0_state");
+    }
+    return 0;
+}
+
+#define hackrf_board_id_name (*dl_hackrf_board_id_name)
+#define hackrf_board_id_read (*dl_hackrf_board_id_read)
+#define hackrf_board_partid_serialno_read (*dl_hackrf_board_partid_serialno_read)
+#define hackrf_close (*dl_hackrf_close)
+#define hackrf_error_name (*dl_hackrf_error_name)
+#define hackrf_exit (*dl_hackrf_exit)
+#define hackrf_init (*dl_hackrf_init)
+#define hackrf_open (*dl_hackrf_open)
+#define hackrf_open_by_serial (*dl_hackrf_open_by_serial)
+#define hackrf_set_amp_enable (*dl_hackrf_set_amp_enable)
+#define hackrf_set_antenna_enable (*dl_hackrf_set_antenna_enable)
+#define hackrf_set_baseband_filter_bandwidth (*dl_hackrf_set_baseband_filter_bandwidth)
+#define hackrf_set_freq (*dl_hackrf_set_freq)
+#define hackrf_set_lna_gain (*dl_hackrf_set_lna_gain)
+#define hackrf_set_sample_rate (*dl_hackrf_set_sample_rate)
+#define hackrf_set_vga_gain (*dl_hackrf_set_vga_gain)
+#define hackrf_start_rx (*dl_hackrf_start_rx)
+#define hackrf_stop_rx (*dl_hackrf_stop_rx)
 #include <math.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -79,6 +164,8 @@ static void hrf_close(struct sdr* s)
 
 static struct sdr* hrf_open(const char* args, double mcr, struct sdr_info* info)
 {
+    if (hrf_load())
+        return NULL;
     (void)mcr;
     struct sdr* s = calloc(1, sizeof(*s));
     if (!s)
@@ -291,7 +378,7 @@ static int hrf_read(struct sdr* s, float* iq, int n, double timeout, double* t, 
     if (s->streaming && now - s->t_check > 0.25) {
         s->t_check = now;
         hackrf_m0_state m0;
-        if (!hackrf_get_m0_state(s->dev, &m0) && m0.num_shortfalls != s->shortfalls) {
+        if (dl_m0_state && !dl_m0_state(s->dev, &m0) && m0.num_shortfalls != s->shortfalls) {
             s->shortfalls = m0.num_shortfalls;
             *st = SDR_OVERFLOW;
         }
