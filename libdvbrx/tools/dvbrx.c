@@ -52,6 +52,13 @@
  *   -d N        DVB bridge on /dev/dvbrxN
  *   -L LNB      LNB controller: "none" (default), "serial:/dev/ttyACM0" or
  *               "udp:HOST:PORT" (text protocol, see doc/lnb-protocol.md)
+ *   -n N        bridge mode: adapters N, N+1... on one wideband capture
+ *   -W HZ       that capture's rate (default 30.72e6)
+ *   -m CHANNEL  standalone: one multiplex of the capture (repeatable),
+ *               "f=HZ,sys=s|s2|c|t|t2,sr=,bw=,ro=,qam=,fec=,isi=,plp=,gold=,o="
+ *   -x HZ       standalone: one channel HZ off the centre of a -S capture
+ *   -U MB/S     USB bandwidth shared by the SDRs of one bus (default 350
+ *               on USB 3, 42 on USB 2; 0: no sharing)
  *   -t N        LDPC threads (default 2)
  *   -R          standalone file source: play at the sample rate, in a loop
  */

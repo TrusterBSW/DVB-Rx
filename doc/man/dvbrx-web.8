@@ -25,8 +25,8 @@ sert une page web (port 8099 par défaut) qui parle aux démons
 par leurs sockets de contrôle. Onglets :
 .TP
 .B Statut
-la radio (carte et numéro de série, fréquence, filtre, débit, gain, AGC,
-niveau, puissance estimée, débordements, LNB) et, par adaptateur, les
+la radio (carte et numéro de série, occupation du bus USB, fréquence, filtre,
+débit, gain, AGC, niveau, puissance estimée, débordements, LNB) et, par adaptateur, les
 paramètres du canal reçu (norme, modulation, rendement, SNR, débit TS,
 erreurs).
 .TP
@@ -43,7 +43,9 @@ dvbv5 pour tvheadend.
 .TP
 .B Alignement
 suivi d'une porteuse satellite ou d'un multiplex DVB-T/T2 : puissance, SNR,
-verrouillage, historique, son facultatif.
+verrouillage, historique, son facultatif. Le gain est automatique ou fixe :
+fixe, les niveaux se comparent directement d'une position de l'antenne à
+l'autre (l'AGC ne compense plus) ; dvbrx reprend son propre gain à l'arrêt.
 .PP
 Le statut et la constellation ne prennent pas la radio. Le scan et
 l'alignement la prennent : quand une application (tvheadend) l'utilise,

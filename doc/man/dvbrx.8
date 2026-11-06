@@ -289,10 +289,13 @@ le flux ne livre qu'un quart des échantillons) ; dvbrx affiche sa version
 au démarrage.
 .TP
 .B HackRF One (libhackrf)
-20 Msps au plus, échantillons sur 8 bits, environ 6 à 7 dB moins sensible
-qu'un B210 ; une seule chaîne de réception (pas de
+20 Msps au plus, échantillons sur 8 bits, nettement moins sensible qu'un B210
+(6 à 7 dB mesurés derrière un hub) ; une seule chaîne de réception (pas de
 .BR \-n ,
 .BR \-m ).
+Il est sensible à son alimentation USB : derrière un hub non alimenté, la
+phase de son oscillateur peut sauter périodiquement (erreurs en DVB-S et
+DVB-C quel que soit le SNR) ; le brancher en direct ou sur un hub alimenté.
 .PP
 En mode pont, le débit d'échantillonnage vaut 2 échantillons par symbole si
 la carte le peut, et au moins débit symbole \(mu (1 + roll-off) / 0,9 : le
@@ -314,6 +317,10 @@ aussitôt, avec
 un réglage DVB-S, S2 ou C au-delà, et tvheadend passe à un autre tuner
 libre. Un réglage entre les deux limites est refusé par le démon (journal :
 « no usable sample rate ») : l'application constate l'absence de signal.
+.PP
+Si la carte ne répond plus (débranchée), le démon s'arrête (code 3) plutôt
+que d'insister ; systemd le relance et il rouvre la carte quand elle revient.
+Une carte absente au démarrage est ouverte au premier réglage.
 .PP
 B210 et bladeRF (AD9361) : entre 138 et 250 MHz, les signaux à trois fois la
 fréquence accordée (414 à 750 MHz) se replient dans la bande ; un filtre

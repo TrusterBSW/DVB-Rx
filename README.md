@@ -166,7 +166,7 @@ Le module noyau `kernel/dvbrx` crée des adaptateurs DVB-S/S2 classiques
 | Débit symbole max, DVB-S (roll-off 0,35) | 41 Msym/s | 41 Msym/s | 13,3 Msym/s |
 | DVB-S2 roll-off 0,20 / 0,05 | 46 / 52,7 Msym/s | 46 / 52,7 Msym/s | 15 / 17,1 Msym/s |
 | DVB-C (roll-off 0,15) | 48 Msym/s | 48 Msym/s | 15,6 Msym/s |
-| Sensibilité (câble SFR, 5/11/2026) | référence | ≈ B210 (±1,5 dB) | 6-7 dB de moins |
+| Sensibilité (câble SFR, 5/11/2026) | référence | ≈ B210 (±1,5 dB) | 6-7 dB de moins (mesuré derrière un hub USB qui le perturbait, voir « Débit USB partagé ») |
 | Horodatage (trous comblés) | oui | oui (FPGA ≤ 0.15) | non |
 | Multicanal (`-n`, `-m`) | oui | oui | non |
 
@@ -272,7 +272,13 @@ dans `/run/dvbrx/usb-N` :
   partagé avec une clé RTL2832 et un B210 (inactifs), perdait ~14 fois par
   seconde des échantillons (compteur « shortfalls » du HackRF,
   `hackrf_debug --state`, et `hackrf_transfer` seul en faisait autant),
-  contre aucune perte branché seul : un HackRF veut son propre port, sans hub.
+  contre aucune perte une fois seul sur le hub (clé détachée).
+- Même sans perte, le HackRF derrière ce petit hub non alimenté voyait la
+  phase de son oscillateur sauter d'environ 90°, deux fois toutes les
+  102,4 ms (alimentation USB) : 2 à 7 % de paquets en erreur en DVB-S et en
+  DVB-C, quels que soient gain, débit et accord. Branché en direct sur un
+  autre PC, la même carte n'a aucun saut. Un HackRF veut un port direct ou un
+  hub alimenté.
 - Carte débranchée : le démon s'arrête (« the SDR does not answer any more »)
   au lieu d'insister (libbladeRF finissait par planter, SIGFPE) ; systemd le
   relance et il rouvre la carte quand elle revient.
