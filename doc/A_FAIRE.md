@@ -167,8 +167,16 @@ un événement périodique du HackRF (firmware 2026.01.3) ou de son
 alimentation, pas un compte d'échantillons ni la synthèse du LO. Capture
 gardée : `~/dvbrx/work/cap/hk2.cs8` (20 Msps, int8) sur 10.5.1.2.
 
-Pistes : chercher dans le firmware une tâche à ~9,8 Hz (détection de
-l'horloge CLKIN, I2C du Si5351, LED…), essayer un autre firmware (avec
+Recherche en ligne (6/11/2026) : aucun rapport de ce motif (sauts par paires
+toutes les ~100 ms) ; seulement des mentions générales d'instabilité de
+phase du HackRF (non cohérent sans horloge externe) et un fil GNU Radio de
+2017 sur des « jitters » en DVB-T large bande, sans conclusion. La détection
+CLKIN du firmware (`clkin.c`, mesure toutes les 50 ms, sans toucher au
+Si5351) ne tourne que sur les cartes r9 ; celle-ci se déclare « older than
+r6 » (Part ID 0xa000cb3c 0xbc61433c) et la boucle principale n'a pas de tâche
+périodique. Pistes restantes : alimentation ou oscillateur de cette carte
+(ancienne révision ou clone), essai avec une horloge externe 10 MHz sur
+CLKIN, `rx_mode` et `si5351c.c` du firmware, un autre firmware (avec
 l'accord du propriétaire) ; côté dvbrx, rattraper plus vite un glissement
 de quadrant en DVB-S (octets de synchro) et suivre un saut de phase en
 DVB-C, ce qui réduirait les pertes sans les supprimer.
