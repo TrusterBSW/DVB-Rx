@@ -5,8 +5,8 @@
  * Each instance registers a DVB-S/S2 adapter with a frontend, a software
  * demux, dvr and net devices, and a control device /dev/dvbrxN through
  * which the daemon receives tuning and LNB control requests, feeds the
- * transport stream, reports the lock status and names the frontend after
- * the SDR (see dvbrx_ioctl.h).
+ * transport stream, reports the lock status, and names the frontend after
+ * the SDR with the symbol rates it can receive (see dvbrx_ioctl.h).
  */
 #include <linux/kfifo.h>
 #include <linux/miscdevice.h>
@@ -417,6 +417,20 @@ static long ctl_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 		if (!n.name[0])
 			return -EINVAL;
 		strscpy(s->fe.ops.info.name, n.name, sizeof(s->fe.ops.info.name));
+		return 0;
+	}
+	case DVBRX_IOC_LIMITS: {
+		struct dvbrx_limits l;
+		struct dvb_frontend_internal_info *info = &s->fe.ops.info;
+
+		if (copy_from_user(&l, (void __user *)arg, sizeof(l)))
+			return -EFAULT;
+		if (l.symbol_rate_min && l.symbol_rate_max && l.symbol_rate_min > l.symbol_rate_max)
+			return -EINVAL;
+		if (l.symbol_rate_min)
+			WRITE_ONCE(info->symbol_rate_min, l.symbol_rate_min);
+		if (l.symbol_rate_max)
+			WRITE_ONCE(info->symbol_rate_max, l.symbol_rate_max);
 		return 0;
 	}
 	default:

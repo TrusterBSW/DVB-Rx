@@ -290,9 +290,15 @@ qu'un B210 ; une seule chaîne de réception (pas de
 .BR \-m ).
 .PP
 Il faut au moins 1,5 échantillon par symbole : un HackRF reçoit au plus
-13,3 Msym/s. Un réglage qui demande plus que la carte ne peut donner est
-refusé (journal : « no usable sample rate »), et le frontend ne se verrouille
-jamais ; l'application constate l'absence de signal.
+13,3 Msym/s, un B210 ou un bladeRF 37,3 Msym/s (56 Msps). Le démon annonce
+ce maximum dans les informations du frontend
+.RB ( FE_GET_INFO ,
+.IR symbol_rate_max ;
+en multicanal, d'après la bande utile de la capture) : le noyau refuse
+aussitôt, avec
+.BR EINVAL ,
+un réglage DVB-S, S2 ou C au-delà, et tvheadend passe à un autre tuner
+libre.
 .PP
 B210 et bladeRF (AD9361) : entre 138 et 250 MHz, les signaux à trois fois la
 fréquence accordée (414 à 750 MHz) se replient dans la bande ; un filtre

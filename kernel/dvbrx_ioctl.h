@@ -8,7 +8,8 @@
  *   write()  feeds MPEG-TS packets into the adapter's demux;
  *   ioctl()  DVBRX_IOC_STATUS reports lock and signal quality,
  *            DVBRX_IOC_REPLY completes a synchronous event (LNB control),
- *            DVBRX_IOC_NAME names the frontend after the SDR (FE_GET_INFO).
+ *            DVBRX_IOC_NAME names the frontend after the SDR (FE_GET_INFO),
+ *            DVBRX_IOC_LIMITS gives the symbol rates the SDR can receive.
  * poll() signals POLLIN when events are pending.
  */
 #ifndef DVBRX_IOCTL_H
@@ -85,8 +86,19 @@ struct dvbrx_name {
 	char name[128]; /* NUL-terminated */
 };
 
+/* Symbol rates the SDR can receive (FE_GET_INFO; 0: unchanged). dvb-core
+ * refuses a DVB-S/S2/C tuning outside them with EINVAL, at once: the
+ * application (tvheadend) then tries another tuner instead of waiting for
+ * a lock that cannot come. */
+struct dvbrx_limits {
+	__u32 symbol_rate_min;
+	__u32 symbol_rate_max;
+	__u32 reserved[6];
+};
+
 #define DVBRX_IOC_STATUS _IOW('S', 1, struct dvbrx_status)
 #define DVBRX_IOC_REPLY _IOW('S', 2, struct dvbrx_reply)
 #define DVBRX_IOC_NAME _IOW('S', 3, struct dvbrx_name)
+#define DVBRX_IOC_LIMITS _IOW('S', 4, struct dvbrx_limits)
 
 #endif /* DVBRX_IOCTL_H */

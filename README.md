@@ -174,10 +174,13 @@ Le module noyau `kernel/dvbrx` crée des adaptateurs DVB-S/S2 classiques
 - B210 et bladeRF (AD9361) : entre 138 et 250 MHz, les signaux à trois fois
   la fréquence accordée se replient dans la bande (filtre passe-bas ~300 MHz
   nécessaire).
-- HackRF : un réglage plus large que ce qu'il peut recevoir (DVB-S à
-  22 000 ou 27 500 kBd) est refusé (« no usable sample rate » dans le
-  journal) : le frontend ne se verrouille pas et l'application constate
-  l'absence de signal. Lui donner une priorité plus basse dans tvheadend.
+- Débit symbole maximal : le démon l'annonce au frontend (`FE_GET_INFO`,
+  `DVBRX_IOC_LIMITS`), d'après le débit de la carte (÷ 1,5) ou, en
+  multicanal, la bande utile de la capture. dvb-core refuse alors aussitôt
+  (`EINVAL`) un réglage DVB-S/S2/C au-delà, par exemple un transpondeur de
+  27 500 kBd sur un HackRF ; tvheadend affiche « failed to tune » et passe
+  à un autre tuner libre (essai du 6/11/2026 : bascule sur le bladeRF, flux
+  en 2,9 s). Sans autre tuner, la chaîne ne démarre pas.
 
 ### Plusieurs cartes en même temps
 

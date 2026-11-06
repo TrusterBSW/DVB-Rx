@@ -1967,14 +1967,45 @@ static void bridge_event(struct bridge* b)
     }
 }
 
+/* Highest symbol rate this adapter can receive: 1.5 samples per symbol at
+ * the SDR's rate (single_rate()), or, on a shared capture, the usable band
+ * (hub_fits()) with the smallest roll-off (0.05). 0: no limit (file). */
+static uint32_t bridge_sr_max(const struct bridge* b)
+{
+    const struct radio* r = b->radio;
+    if (r->file)
+        return 0;
+    double sr;
+    if (b->hub)
+        sr = 2 * HUB_USABLE * b->hub->fs / 1.05;
+    else {
+        double rate = b->max_rate;
+        if (r->dev && r->info.rate_max > 0 && r->info.rate_max < rate)
+            rate = r->info.rate_max;
+        sr = rate / 1.5;
+    }
+    return sr > 0 && sr < 4e9 ? (uint32_t)sr : 0;
+}
+
 /* Names the frontend after the SDR ("dvbrx B210 31A5B7C"), once it is
- * open: applications (tvheadend) tell the tuners apart by this name. */
+ * open: applications (tvheadend) tell the tuners apart by this name. Also
+ * gives it the symbol rates the SDR can receive: dvb-core refuses a
+ * tuning beyond them at once, and the application tries another tuner. */
 static void bridge_name(struct bridge* b)
 {
     const struct radio* r = b->radio;
-    if (b->named || !r->dev || (!r->info.model[0] && !r->info.serial[0]))
+    if (b->named || !r->dev)
         return;
     b->named = 1;
+    struct dvbrx_limits l = { .symbol_rate_max = bridge_sr_max(b) };
+    if (l.symbol_rate_max) {
+        if (!ioctl(b->ctl, DVBRX_IOC_LIMITS, &l))
+            fprintf(stderr, "bridge: symbol rate up to %.3f Msym/s\n", l.symbol_rate_max / 1e6);
+        else if (errno != ENOTTY) /* an older module: no limit */
+            perror("DVBRX_IOC_LIMITS");
+    }
+    if (!r->info.model[0] && !r->info.serial[0])
+        return;
     struct dvbrx_name n = { { 0 } };
     snprintf(n.name, sizeof(n.name), "dvbrx %s%s%s", r->info.model[0] ? r->info.model : r->drv->prefix,
              r->info.serial[0] ? " " : "", r->info.serial);
