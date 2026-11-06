@@ -121,8 +121,18 @@ static struct sdr* brf_open(const char* args, double mcr, struct sdr_info* info)
         info->bw_min = r->min * r->scale;
         info->bw_max = r->max * r->scale;
     }
-    fprintf(stderr, "bladeRF: %s, FPGA %u.%u.%u, gain %.0f..%.0f dB, up to %.2f Msps, filter %.2f..%.2f MHz, %s\n",
-            bladerf_get_board_name(s->dev), fv.major, fv.minor, fv.patch, info->gain_min, info->gain_max,
+    bladerf_fpga_size fs = BLADERF_FPGA_UNKNOWN;
+    bladerf_get_fpga_size(s->dev, &fs);
+    const char* board = bladerf_get_board_name(s->dev);
+    snprintf(info->model, sizeof(info->model), "%s%s",
+             !strcmp(board, "bladerf2") ? "bladeRF 2.0" : !strcmp(board, "bladerf1") ? "bladeRF" : board,
+             fs == BLADERF_FPGA_A4 ? " xA4" : fs == BLADERF_FPGA_A5 ? " xA5" : fs == BLADERF_FPGA_A9 ? " xA9" :
+             fs == BLADERF_FPGA_40KLE ? " x40" : fs == BLADERF_FPGA_115KLE ? " x115" : "");
+    struct bladerf_serial sn;
+    if (!bladerf_get_serial_struct(s->dev, &sn))
+        snprintf(info->serial, sizeof(info->serial), "%s", sn.serial);
+    fprintf(stderr, "bladeRF: %s, serial %s, FPGA %u.%u.%u, gain %.0f..%.0f dB, up to %.2f Msps, filter %.2f..%.2f MHz, %s\n",
+            info->model, info->serial[0] ? info->serial : "?", fv.major, fv.minor, fv.patch, info->gain_min, info->gain_max,
             info->rate_max / 1e6, info->bw_min / 1e6, info->bw_max / 1e6,
             s->meta ? "timestamps" : "no timestamps");
     return s;

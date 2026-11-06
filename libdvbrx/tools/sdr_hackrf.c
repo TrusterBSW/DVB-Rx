@@ -112,8 +112,21 @@ static struct sdr* hrf_open(const char* args, double mcr, struct sdr_info* info)
     hackrf_board_id_read(s->dev, &board);
     *info = (struct sdr_info){ .name = "HackRF", .gain_min = 0, .gain_max = 116, .rate_max = 20e6,
                                .bw_min = 1.75e6, .bw_max = 28e6, .timestamps = 0 };
-    fprintf(stderr, "HackRF: %s, gain 0..116 dB (amp 14 + LNA 40 + VGA 62), up to 20 Msps\n",
-            hackrf_board_id_name((enum hackrf_board_id)board));
+    snprintf(info->model, sizeof(info->model), "%s", hackrf_board_id_name((enum hackrf_board_id)board));
+    /* the MCU's unique ID, as hackrf_info prints it, without the leading
+     * zeros (hackrf_open_by_serial() matches the end of the number) */
+    read_partid_serialno_t ps;
+    if (hackrf_board_partid_serialno_read(s->dev, &ps) == HACKRF_SUCCESS) {
+        char sn[33];
+        snprintf(sn, sizeof(sn), "%08x%08x%08x%08x", ps.serial_no[0], ps.serial_no[1], ps.serial_no[2],
+                 ps.serial_no[3]);
+        const char* p = sn;
+        while (p[0] == '0' && p[1])
+            p++;
+        snprintf(info->serial, sizeof(info->serial), "%s", p);
+    }
+    fprintf(stderr, "HackRF: %s, serial %s, gain 0..116 dB (amp 14 + LNA 40 + VGA 62), up to 20 Msps\n",
+            info->model, info->serial[0] ? info->serial : "?");
     return s;
 }
 

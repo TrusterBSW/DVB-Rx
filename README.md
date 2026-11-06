@@ -129,6 +129,14 @@ Le module noyau `kernel/dvbrx` crée des adaptateurs DVB-S/S2 classiques
 - tvheadend voit trois frontends sur l'adaptateur : DVB-S (S/S2/S2X),
   DVB-C et DVB-T (T et T2), utilisables un à la fois ; activer ceux voulus
   et leur associer un réseau (Configuration → DVB Inputs → TV adapters).
+- Le frontend porte le nom de la carte et son numéro de série
+  (« dvbrx B210 31A5B7C », « dvbrx bladeRF 2.0 xA4 0a0896e9… ») : le démon
+  ouvre la carte à son démarrage et le donne au module (`DVBRX_IOC_NAME`),
+  avant que tvheadend ne démarre (`Type=notify`, `Before=tvheadend.service`).
+  tvheadend lit ce nom en découvrant l'adaptateur, et en tire l'identifiant
+  de sa configuration : chaque carte garde la sienne. Changer de carte
+  tvheadend en marche demande de redémarrer tvheadend, puis d'activer les
+  frontends de la nouvelle carte et de leur associer les réseaux.
   Testé en radio réelle via le HackRF : scan puis lecture de chaînes en
   DVB-S, DVB-S2, DVB-T, DVB-T2 et DVB-C ; les paramètres (constellation,
   rendement, garde, FFT) sont remontés à tvheadend. DVB-S2X : en radio

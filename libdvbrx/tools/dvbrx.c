@@ -79,6 +79,7 @@
 #include <pthread.h>
 #include <signal.h>
 #include <stdarg.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -752,6 +753,7 @@ struct bridge {
     double rate_t;          /* TS rate: last sample */
     uint64_t rate_pk;
     double ts_mbps;
+    int named;              /* the frontend carries the SDR's name */
 };
 
 /* ---- several adapters on one wideband capture ----------------------------- */
@@ -1310,11 +1312,25 @@ static int app_busy(const struct bridge* b)
     return 0;
 }
 
+/* s without the characters a JSON string would have to escape */
+static void json_safe(char* d, const char* s, size_t size)
+{
+    size_t k = 0;
+    for (; *s && k + 1 < size; s++)
+        if ((unsigned char)*s >= 0x20 && *s != '"' && *s != '\\')
+            d[k++] = *s;
+    d[k] = 0;
+}
+
 static void status_json(struct sbuf* o)
 {
     const struct radio* r = ctl_b[0].radio;
     const int running = r->started && r->running;
     sb_printf(o, "{\"ok\": true, \"radio\": {\"source\": \"%s\", ", r->file ? "file" : r->drv ? r->drv->prefix : "none");
+    char model[sizeof(r->info.model)], serial[sizeof(r->info.serial)];
+    json_safe(model, r->dev ? r->info.model : "", sizeof(model));
+    json_safe(serial, r->dev ? r->info.serial : "", sizeof(serial));
+    sb_printf(o, "\"model\": \"%s\", \"serial\": \"%s\", ", model, serial);
     sb_printf(o, "\"rate_max\": %.0f, \"multi\": %s, ", r->file ? 61.44e6 : r->dev ? r->info.rate_max : r->drv ? r->drv->rate_max : 0,
               r->file || (r->drv && r->drv->multi) ? "true" : "false");
     sb_num(o, "freq", r->freq, 0);
@@ -1951,6 +1967,49 @@ static void bridge_event(struct bridge* b)
     }
 }
 
+/* Names the frontend after the SDR ("dvbrx B210 31A5B7C"), once it is
+ * open: applications (tvheadend) tell the tuners apart by this name. */
+static void bridge_name(struct bridge* b)
+{
+    const struct radio* r = b->radio;
+    if (b->named || !r->dev || (!r->info.model[0] && !r->info.serial[0]))
+        return;
+    b->named = 1;
+    struct dvbrx_name n = { { 0 } };
+    snprintf(n.name, sizeof(n.name), "dvbrx %s%s%s", r->info.model[0] ? r->info.model : r->drv->prefix,
+             r->info.serial[0] ? " " : "", r->info.serial);
+    if (ioctl(b->ctl, DVBRX_IOC_NAME, &n)) {
+        if (errno != ENOTTY) /* an older module: the name stays generic */
+            perror("DVBRX_IOC_NAME");
+        return;
+    }
+    fprintf(stderr, "bridge: frontend named \"%s\"\n", n.name);
+}
+
+/* Tells systemd (Type=notify) that the adapters are ready: the units
+ * ordered after this one, tvheadend, then find them named. */
+static void notify_ready(void)
+{
+    const char* path = getenv("NOTIFY_SOCKET");
+    if (!path || (path[0] != '/' && path[0] != '@'))
+        return;
+    struct sockaddr_un sa = { .sun_family = AF_UNIX };
+    const size_t len = strlen(path);
+    if (len >= sizeof(sa.sun_path))
+        return;
+    memcpy(sa.sun_path, path, len);
+    if (sa.sun_path[0] == '@')
+        sa.sun_path[0] = 0; /* abstract namespace */
+    const int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    if (fd < 0)
+        return;
+    static const char msg[] = "READY=1";
+    if (sendto(fd, msg, sizeof(msg) - 1, 0, (struct sockaddr*)&sa,
+               (socklen_t)(offsetof(struct sockaddr_un, sun_path) + len)) < 0)
+        perror("NOTIFY_SOCKET");
+    close(fd);
+}
+
 /* Serves n adapters (one, or several sharing a hub) from this thread. */
 static int run_bridges(struct bridge* b, int n)
 {
@@ -1970,7 +2029,9 @@ static int run_bridges(struct bridge* b, int n)
         fprintf(stderr, "bridge: serving /dev/dvb through %s\n", path);
         b[i].last_print = b[i].t0 = now();
         b[i].ts_mbps = NAN;
+        bridge_name(&b[i]);
     }
+    notify_ready();
     if (ctl_path && ctl_path[0]) {
         char def[64];
         const char* cp = ctl_path;
@@ -1990,6 +2051,7 @@ static int run_bridges(struct bridge* b, int n)
                     bridge_event(&b[i]);
         pthread_mutex_lock(&ctl_lock);
         for (int i = 0; i < n; i++) {
+            bridge_name(&b[i]); /* the SDR opened at the first tuning */
             if (now() - b[i].last_status >= 0.2) {
                 if (!b[i].mode) /* the application sees its own reception only */
                     bridge_status(&b[i]);
@@ -2314,6 +2376,11 @@ int main(int argc, char** argv)
             fprintf(stderr, "several adapters on one capture (-n, -W): not with this SDR\n");
             return 2;
         }
+        /* open the SDR now: its name goes to the frontend before the
+         * applications look (it is opened again at the first tuning if it
+         * is not there yet) */
+        if (radio.drv && !radio.file && radio_open(&radio))
+            fprintf(stderr, "%s: not available yet\n", radio.drv->prefix);
         if (nbridges > 1 || wide_rate > 0) {
             /* one capture for all the adapters, at a fixed rate; the centre
              * follows the channels in use, or stays at -f */

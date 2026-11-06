@@ -2,10 +2,13 @@
 Description=dvbrx SDR DVB-S/S2/S2X receiver for /dev/dvb/adapter%i
 Documentation=file:///usr/local/share/doc/dvbrx/README.md
 After=systemd-modules-load.service systemd-udev-settle.service
+# the frontend is named after the SDR ("dvbrx B210 31A5B7C") once the
+# daemon is ready: tvheadend reads the name when it finds the adapter
+Before=tvheadend.service
 ConditionPathExists=/dev/dvbrx%i
 
 [Service]
-Type=simple
+Type=notify
 User=dvbrxd
 Group=video
 # serial LNB controller (dialout), USB access to the USRP (plugdev)

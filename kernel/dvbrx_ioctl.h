@@ -7,7 +7,8 @@
  *   read()   returns struct dvbrx_event records (tuning, LNB control);
  *   write()  feeds MPEG-TS packets into the adapter's demux;
  *   ioctl()  DVBRX_IOC_STATUS reports lock and signal quality,
- *            DVBRX_IOC_REPLY completes a synchronous event (LNB control).
+ *            DVBRX_IOC_REPLY completes a synchronous event (LNB control),
+ *            DVBRX_IOC_NAME names the frontend after the SDR (FE_GET_INFO).
  * poll() signals POLLIN when events are pending.
  */
 #ifndef DVBRX_IOCTL_H
@@ -77,7 +78,15 @@ struct dvbrx_reply {
 	__s32 result; /* 0 or a negative errno for the application */
 };
 
+/* The frontend's name, e.g. "dvbrx B210 31A5B7C": applications such as
+ * tvheadend read it when they find the adapter, and tell the tuners apart
+ * by it. It stays after the daemon closes /dev/dvbrxN. */
+struct dvbrx_name {
+	char name[128]; /* NUL-terminated */
+};
+
 #define DVBRX_IOC_STATUS _IOW('S', 1, struct dvbrx_status)
 #define DVBRX_IOC_REPLY _IOW('S', 2, struct dvbrx_reply)
+#define DVBRX_IOC_NAME _IOW('S', 3, struct dvbrx_name)
 
 #endif /* DVBRX_IOCTL_H */
