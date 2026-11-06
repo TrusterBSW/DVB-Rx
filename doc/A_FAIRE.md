@@ -151,13 +151,24 @@ T, T2, C et le frontal.
 - Côté émetteur (projet dvbtx) : CPU du banc de filtres à 114 % à 52 MBd,
   sans sous-débit pour l'instant (à suivre par la session dvbtx).
 
-## HackRF en DVB-S (6/11/2026)
+## HackRF : sauts de phase périodiques (6/11/2026)
 
-Sur le câble fermé (dvbtx, 1200 MHz), le HackRF verrouille le DVB-S QPSK 3/4
-avec 16 à 20 dB de SNR mais perd 2,6 à 6,7 % des paquets (10 Msym/s à
-2 éch./symbole, 13,3 Msym/s à 1,5), sans aucune perte USB (compteur M0 à 0) ;
-le B210 reçoit les mêmes signaux sans erreur. Pistes : écrêtage de l'ADC 8 bits
-pendant le réglage du gain (niveau −12 dBFS vu au sondage), filtre analogique
-choisi à 24 MHz pour 20 Msps (repliement), coupe-continu au centre du signal
-(accord au centre : essayer un accord décalé).
+Sur le câble fermé (dvbtx, DVB-S QPSK 3/4 10 Msym/s à 1200 MHz), le HackRF
+verrouille avec 11 à 20 dB de SNR mais perd ~3,5 % des paquets quel que soit le
+gain (50, 60, 70 dB ou auto), sans écrêtage ni perte USB (compteur M0 à 0) ;
+le B210 reçoit le même signal sans erreur. Le même défaut est dans les
+échantillons bruts de `hackrf_transfer` (décodés hors ligne : 3,4 %), donc pas
+dans dvbrx. Cause mesurée : la phase de l'oscillateur du HackRF saute
+d'environ 90° par paires, à 4,1 ms d'intervalle, toutes les 102,4 ms (~27
+événements/s) ; la récupération de porteuse glisse d'un quadrant à chaque
+fois. Le B210, enregistré en même temps, n'a aucun saut. Le rythme ne change
+ni avec le débit (16 ou 20 Msps) ni avec l'accord (1200 ou 1203 MHz) : c'est
+un événement périodique du HackRF (firmware 2026.01.3) ou de son
+alimentation, pas un compte d'échantillons ni la synthèse du LO. Capture
+gardée : `~/dvbrx/work/cap/hk2.cs8` (20 Msps, int8) sur 10.5.1.2.
 
+Pistes : chercher dans le firmware une tâche à ~9,8 Hz (détection de
+l'horloge CLKIN, I2C du Si5351, LED…), essayer un autre firmware (avec
+l'accord du propriétaire) ; côté dvbrx, rattraper plus vite un glissement
+de quadrant en DVB-S (octets de synchro) et suivre un saut de phase en
+DVB-C, ce qui réduirait les pertes sans les supprimer.
