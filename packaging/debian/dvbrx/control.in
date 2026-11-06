@@ -1,0 +1,21 @@
+Package: dvbrx
+Version: @VERSION@
+Architecture: @ARCH@
+Maintainer: BILLY Rémi <byhoster.association@gmail.com>
+Section: video
+Priority: optional
+Depends: dkms, kmod, passwd, @DEPENDS@
+Recommends: @RECOMMENDS@
+Suggests: dvbrx-web, uhd-host, tvheadend, dvb-tools
+Installed-Size: @SIZE@
+Homepage: https://github.com/TrusterBSW/DVB-Rx
+Description: real-time DVB receiver on software radios, seen as a /dev/dvb tuner
+ dvbrx demodulates and decodes digital television in real time from a
+ software radio (USRP B210, bladeRF 2.0 micro, HackRF One): DVB-S, DVB-S2 and
+ DVB-S2X up to 256APSK, DVB-C, DVB-T and DVB-T2. A kernel module (DKMS) exposes
+ each radio as a standard Linux DVB adapter (/dev/dvb/adapterN), so tvheadend,
+ VLC or dvbv5-zap use it like a hardware tuner; LNB control through an ESP32.
+ .
+ The radio libraries (libuhd, libbladeRF, libhackrf) are loaded at run time:
+ only those of the radios in use are needed. The kernel module is built for
+ the running kernel and needs its headers.

@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Move the USB host controller interrupts to the last CPU, so that the
 # receiver threads (kept off it by CPUAffinity in dvbrxd@.service.d/cpu.conf)
 # are not slowed down by USB interrupt and softirq work: at 30 Msps a B210

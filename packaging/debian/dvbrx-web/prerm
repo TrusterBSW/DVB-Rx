@@ -1,0 +1,9 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+set -e
+case "$1" in
+remove | deconfigure)
+    [ -d /run/systemd/system ] && systemctl stop dvbrx-web.service 2>/dev/null || true
+    ;;
+esac
+exit 0

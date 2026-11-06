@@ -1,0 +1,56 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+# dvbrx: user, kernel module (DKMS), udev, systemd.
+set -e
+DKMS_VER=@DKMS_VER@
+
+if [ "$1" = configure ]; then
+    if ! getent passwd dvbrxd >/dev/null; then
+        useradd --system --home-dir /var/lib/dvbrxd --create-home --shell /usr/sbin/nologin dvbrxd
+    fi
+    for g in video dialout plugdev; do
+        getent group "$g" >/dev/null || groupadd --system "$g"
+        usermod -a -G "$g" dvbrxd
+    done
+    install -d -o dvbrxd -g video -m 0750 /var/lib/dvbrxd
+    install -d /etc/dvbrxd
+    [ -f /etc/dvbrxd/0.conf ] || install -m 0644 /usr/share/doc/dvbrx/examples/dvbrxd.conf /etc/dvbrxd/0.conf
+
+    # kernel module, rebuilt by DKMS for each new kernel; the headers of the
+    # running kernel are needed (linux-headers-..., proxmox-default-headers)
+    if command -v dkms >/dev/null; then
+        dkms status -m dvbrx -v "$DKMS_VER" 2>/dev/null | grep -q . || dkms add -m dvbrx -v "$DKMS_VER" || true
+        # for the running kernel and the newest one installed (the next boot), as dh_dkms does
+        newest=$(ls /lib/modules 2>/dev/null | sort -V | tail -1)
+        for k in $(printf '%s\n' "$(uname -r)" "$newest" | sort -u); do
+            [ -n "$k" ] || continue
+            if [ -d "/lib/modules/$k/build" ]; then
+                dkms install -m dvbrx -v "$DKMS_VER" -k "$k" ||
+                    echo "dvbrx: the kernel module did not build for $k, see /var/lib/dkms/dvbrx/$DKMS_VER/build/make.log" >&2
+            elif [ "$k" = "$(uname -r)" ]; then
+                echo "dvbrx: no headers for the running kernel $k: install them (linux-headers-$k," >&2
+                echo "       or proxmox-default-headers on Proxmox VE), then: dkms autoinstall" >&2
+            fi
+        done
+    fi
+
+    if command -v udevadm >/dev/null; then
+        udevadm control --reload 2>/dev/null || true
+    fi
+    if [ -d /run/systemd/system ]; then
+        systemctl daemon-reload || true
+        if modprobe dvbrx 2>/dev/null; then
+            udevadm trigger --subsystem-match=misc --action=add 2>/dev/null || true
+            # running daemons get the new binary
+            systemctl try-restart 'dvbrxd@*.service' || true
+        fi
+    fi
+    cat <<EOF
+dvbrx installed. Next:
+  - the number of adapters: /etc/modprobe.d/dvbrx.conf (then: rmmod dvbrx; modprobe dvbrx)
+  - the SDR of adapter N: /etc/dvbrxd/N.conf (examples in /usr/share/doc/dvbrx/examples)
+  - systemctl enable --now dvbrxd@0
+  - man dvbrx
+EOF
+fi
+exit 0

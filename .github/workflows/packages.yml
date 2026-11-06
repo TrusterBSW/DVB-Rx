@@ -1,0 +1,160 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# The Debian packages: dvbrx and dvbrx-web, ONE pair for Debian 12 / 13, Proxmox VE 8 / 9 and Ubuntu 24.04,
+# built on Debian 12 (the oldest: the radio libraries are loaded at run time, whatever their soname), then
+# installed and checked in a fresh container of each release, and published on the Releases page when
+# the run comes from a tag v*. Same steps as packaging/build-all-debs.sh, which does it locally.
+name: packages
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: packages
+    runs-on: ubuntu-latest
+    container: debian:12
+    env:
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - name: Build dependencies
+        # git before the checkout: without it actions/checkout downloads an archive without .git
+        # and the changelog loses its git describe
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends build-essential libfftw3-dev libuhd-dev \
+              libbladerf-dev libhackrf-dev dpkg-dev git ca-certificates >/dev/null
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0      # tags, for git describe
+
+      - name: Tag matches VERSION
+        if: github.ref_type == 'tag'
+        run: |
+          v=$(cat VERSION)
+          [ "$GITHUB_REF_NAME" = "v$v" ] || { echo "tag $GITHUB_REF_NAME but VERSION is $v" >&2; exit 1; }
+
+      - name: Build the packages
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          for deb in $(DEB_SUFFIX= ./packaging/build-deb.sh dist); do
+              echo "$deb"
+              dpkg-deb --info "$deb"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb
+          path: dist/*.deb
+          if-no-files-found: error
+
+  check:
+    name: check ${{ matrix.image }}
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["debian:12", "debian:13", "ubuntu:24.04"]
+    container: ${{ matrix.image }}
+    env:
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: install.sh
+          sparse-checkout-cone-mode: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: deb
+          path: dist
+
+      - name: Install the packages (install.sh)
+        run: |
+          rm -f /etc/dpkg/dpkg.cfg.d/excludes /etc/dpkg/dpkg.cfg.d/docker   # images without man pages
+          apt-get update -qq
+          apt-get install -y -qq man-db lintian >/dev/null
+          sh install.sh --deb dist/dvbrx_*_amd64.deb --deb dist/dvbrx-web_*_all.deb --web
+
+      - name: Run it
+        run: |
+          set -e
+          dvbrx --version
+          dvbrx -h >/dev/null
+          dvbrx-web --version
+          for f in /usr/lib/dvbrx/dvbrx-x86-64-*; do
+              if ldd "$f" | grep "not found"; then echo "$f: library missing"; exit 1; fi
+          done
+          DVBRX_ARCH=v2 dvbrx --version
+          # each radio library loads (no radio here: the error must come from the device, not from loading)
+          for drv in uhd bladerf hackrf; do
+              msg=$(timeout 60 dvbrx -u "$drv:" -f 1e9 -s 1e6 -o /dev/null 2>&1 | grep -v '^\[INFO\]') || true
+              if printf '%s\n' "$msg" | grep -q -e 'library not found' -e ' has no '; then
+                  echo "radio $drv: NOT LOADED: $msg"; exit 1
+              fi
+              echo "radio $drv: loads ($(printf '%s\n' "$msg" | grep -m1 . || echo 'device answers'))"
+          done
+
+      - name: Kernel module (DKMS)
+        run: |
+          . /etc/os-release
+          case "$ID" in ubuntu) h=linux-headers-generic ;; *) h=linux-headers-amd64 ;; esac
+          apt-get install -y -qq "$h" >/dev/null
+          k=$(ls /lib/modules | sort -V | tail -1)
+          dkms build -m dvbrx -v "$(dpkg-query -W -f '${Version}' dvbrx | cut -d+ -f1)" -k "$k"
+
+      - name: Manual pages
+        run: |
+          man=$(command -v man.REAL || command -v man)    # minimized Ubuntu images: man is a stub
+          bad=0
+          for p in dvbrx.8 dvbrx-web.8; do
+              sec=${p##*.}
+              $man -w "$sec" "${p%.*}" 2>/dev/null | grep -q "/man$sec/$p" || { echo "missing man page $p"; bad=1; }
+              $man -L fr -w "$sec" "${p%.*}" 2>/dev/null | grep -q "/fr/man$sec/$p" || { echo "missing French man page $p"; bad=1; }
+          done
+          exit $bad
+
+      - name: Lintian
+        run: |
+          out=$(lintian --no-tag-display-limit dist/*.deb 2>&1 || true)
+          printf '%s\n' "$out"
+          if printf '%s\n' "$out" | grep -q '^E:'; then echo "lintian errors" >&2; exit 1; fi
+          echo "lintian: no error"
+
+  release:
+    name: GitHub release
+    needs: check
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: deb
+          path: dist
+
+      - name: Checksums
+        working-directory: dist
+        run: |
+          sha256sum *.deb > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          tag=$GITHUB_REF_NAME
+          if gh release view "$tag" >/dev/null 2>&1; then
+              gh release upload "$tag" dist/*.deb dist/SHA256SUMS --clobber    # workflow run again
+          else
+              gh release create "$tag" dist/*.deb dist/SHA256SUMS --verify-tag --title "dvbrx ${tag#v}" \
+                  --generate-notes
+          fi

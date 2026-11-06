@@ -1,0 +1,12 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+set -e
+case "$1" in
+remove)
+    [ -d /run/systemd/system ] && systemctl daemon-reload || true
+    ;;
+purge)
+    rm -rf /var/lib/dvbrx-web
+    ;;
+esac
+exit 0

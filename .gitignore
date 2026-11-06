@@ -5,3 +5,7 @@ __pycache__/
 /libdvbrx/build/
 /gr-dvbrx/build/
 /python/dvbrx/*.so
+/dist/
+*.deb
+# built packages published in releases/ (packaging/build-all-debs.sh writes dist/)
+!/releases/*.deb

@@ -1,0 +1,14 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+set -e
+case "$1" in
+remove)
+    [ -d /run/systemd/system ] && systemctl daemon-reload || true
+    rmmod dvbrx 2>/dev/null || true
+    ;;
+purge)
+    rm -rf /etc/dvbrxd/[0-9]*.conf /run/dvbrx
+    # the dvbrxd user and /var/lib/dvbrxd stay (dvbrx-web may use them)
+    ;;
+esac
+exit 0

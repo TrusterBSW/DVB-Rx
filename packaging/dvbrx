@@ -1,0 +1,24 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+# dvbrx: runs the build made for this processor. The receivers are
+# vectorised (LDPC in AVX2 / AVX-512), so the package carries three builds:
+# x86-64-v4 (AVX-512), x86-64-v3 (AVX2, Haswell and later), x86-64-v2.
+# DVBRX_ARCH=v2|v3|v4 forces one.
+dir=/usr/lib/dvbrx
+flags=" $(grep -m1 '^flags' /proc/cpuinfo 2>/dev/null | cut -d: -f2) "
+has() {
+    for f in "$@"; do
+        case "$flags" in *" $f "*) ;; *) return 1 ;; esac
+    done
+}
+v=${DVBRX_ARCH:-}
+if [ -z "$v" ]; then
+    if has avx512f avx512bw avx512cd avx512dq avx512vl avx2 bmi2 fma; then
+        v=v4
+    elif has avx2 avx bmi1 bmi2 fma movbe f16c; then
+        v=v3
+    else
+        v=v2
+    fi
+fi
+exec "$dir/dvbrx-x86-64-$v" "$@"

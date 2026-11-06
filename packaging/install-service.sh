@@ -1,12 +1,14 @@
 #!/bin/sh
-# Installs dvbrx: the dvbrx receiver (dvbrxd@N service), the dvbrx kernel module (DKMS),
-# the udev rule, the systemd service and an unprivileged "dvbrxd" user.
-# usage: sudo packaging/install.sh [adapters]
-#        sudo packaging/install.sh --web   (only dvbrx-web, the web supervision page;
-#                                           the dvbrx-web service is installed, not enabled)
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Installs dvbrx from this source checkout, under /usr/local (the .deb, see install.sh at the top of
+# the repository, is the usual way): the dvbrx receiver (dvbrxd@N service), the dvbrx kernel module
+# (DKMS), the udev rule, the systemd service and an unprivileged "dvbrxd" user.
+# usage: sudo packaging/install-service.sh [adapters]
+#        sudo packaging/install-service.sh --web   (only dvbrx-web, the web supervision page;
+#                                                   the dvbrx-web service is installed, not enabled)
 set -e
 cd "$(dirname "$0")/.."
-VERSION=0.1
+VERSION=$(cat VERSION)
 
 if [ "$1" = "--web" ]; then
     getent passwd dvbrxd >/dev/null ||
@@ -20,7 +22,8 @@ if [ "$1" = "--web" ]; then
     install -m 0644 apps/dvbrx-web/static/* /usr/local/lib/dvbrx-web/static/
     ln -sf ../lib/dvbrx-web/dvbrx-web /usr/local/bin/dvbrx-web
     install -D -m 0644 apps/dvbrx-web/README.md /usr/local/share/doc/dvbrx/dvbrx-web.md
-    install -D -m 0644 doc/man/dvbrx-web.8 /usr/local/share/man/man8/dvbrx-web.8
+    install -D -m 0644 man/dvbrx-web.8 /usr/local/share/man/man8/dvbrx-web.8
+    install -D -m 0644 man/fr/dvbrx-web.8 /usr/local/share/man/fr/man8/dvbrx-web.8
     install -D -m 0644 doc/dvbrx-web-api.md /usr/local/share/doc/dvbrx/dvbrx-web-api.md
     install -d /etc/dvbrxd
     [ -f /etc/dvbrxd/web.conf ] || install -m 0644 packaging/dvbrx-web.conf.example /etc/dvbrxd/web.conf
@@ -40,15 +43,18 @@ ln -sf dvbrx /usr/local/bin/dvbrxd   # former name
 install -D -m 0755 packaging/dvbrx-irq-pin /usr/local/sbin/dvbrx-irq-pin
 install -D -m 0644 packaging/dvbrxd-cpu.conf.example /usr/local/share/doc/dvbrx/dvbrxd-cpu.conf.example
 install -D -m 0644 README.md /usr/local/share/doc/dvbrx/README.md
+install -D -m 0644 README.fr.md /usr/local/share/doc/dvbrx/README.fr.md
 install -D -m 0644 doc/lnb-protocol.md /usr/local/share/doc/dvbrx/lnb-protocol.md
 install -D -m 0644 doc/dvbrx-web-api.md /usr/local/share/doc/dvbrx/dvbrx-web-api.md
-install -D -m 0644 doc/man/dvbrx.8 /usr/local/share/man/man8/dvbrx.8
+install -D -m 0644 man/dvbrx.8 /usr/local/share/man/man8/dvbrx.8
+install -D -m 0644 man/fr/dvbrx.8 /usr/local/share/man/fr/man8/dvbrx.8
 
 # kernel module, rebuilt by DKMS for new kernels
 rm -rf /usr/src/dvbrx-$VERSION
 mkdir -p /usr/src/dvbrx-$VERSION
 cp kernel/dvbrx.c kernel/dvbrx_ioctl.h kernel/Kbuild kernel/Makefile kernel/dkms.conf \
     /usr/src/dvbrx-$VERSION/
+sed -i "s/^PACKAGE_VERSION=.*/PACKAGE_VERSION=\"$VERSION\"/" /usr/src/dvbrx-$VERSION/dkms.conf
 dkms remove -m dvbrx -v $VERSION --all >/dev/null 2>&1 || true
 dkms install -m dvbrx -v $VERSION
 echo dvbrx > /etc/modules-load.d/dvbrx.conf

@@ -1,8 +1,21 @@
-# /etc/dvbrxd/N.conf: options of dvbrx -d N (see dvbrx -h)
+# /etc/dvbrxd/N.conf: options of the dvbrxd@N service (dvbrx -d N), see dvbrx -h
+# and man dvbrx. One file per adapter; the module's number of adapters is in
+# /etc/modprobe.d/dvbrx.conf. Uncomment one line, then: systemctl enable --now dvbrxd@N
 #
-# USRP B210, LNB controller on the ESP32 over USB serial, 3 LDPC threads:
-#DVBRXD_ARGS="-u type=b200 -G 40 -L serial:/dev/ttyACM0 -t 3"
+# USRP B210 (UHD: install uhd-host, then uhd_images_downloader), automatic gain:
+#DVBRXD_ARGS="-u type=b200 -G auto -t 3"
+# the same with the LNB controller (ESP32) on USB serial:
+#DVBRXD_ARGS="-u type=b200 -G auto -L serial:/dev/ttyACM0 -t 3"
 #
-# Simulated radio: an IQ file replayed in a loop at the sample rate asked
-# by the tuning request (2 samples per symbol):
-DVBRXD_ARGS="-F /var/lib/dvbrxd/sim.fc32 -t 2"
+# bladeRF 2.0 micro (libbladerf2; FPGA matching libbladeRF), input RX1:
+#DVBRXD_ARGS="-u bladerf: -A RX1 -G auto -t 3"
+#
+# HackRF One (libhackrf0), 20 Msps at most: on its own USB port, not behind
+# an unpowered hub:
+#DVBRXD_ARGS="-u hackrf: -G auto -t 2"
+#
+# Several cards: name each one by its serial number, e.g.
+#   -u uhd:serial=31A5B7C   -u bladerf:*:serial=0a0896e9...   -u hackrf:334c64dc39395367
+#
+# No radio: an IQ file replayed in a loop at the rate the tuning asks for:
+#DVBRXD_ARGS="-F /var/lib/dvbrxd/sim.fc32 -t 2"

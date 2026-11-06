@@ -1,0 +1,17 @@
+Package: dvbrx-web
+Version: @VERSION@
+Architecture: all
+Maintainer: BILLY Rémi <byhoster.association@gmail.com>
+Section: video
+Priority: optional
+Depends: python3 (>= 3.11), python3-numpy, passwd
+Recommends: dvbrx
+Installed-Size: @SIZE@
+Homepage: https://github.com/TrusterBSW/DVB-Rx
+Description: web supervision page for the dvbrx DVB receiver
+ dvbrx-web serves a web page (port 8099) that talks to the dvbrx daemons
+ through their control sockets: the radio and each adapter at a glance,
+ constellation, quick (FFT) and full scans of the cable, terrestrial and
+ satellite bands with an export for tvheadend, and dish or antenna alignment.
+ .
+ The service is installed, not enabled: systemctl enable --now dvbrx-web.

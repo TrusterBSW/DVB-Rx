@@ -1,0 +1,18 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+# dvbrx-web: installed, not enabled (systemctl enable --now dvbrx-web).
+set -e
+if [ "$1" = configure ]; then
+    if ! getent passwd dvbrxd >/dev/null; then
+        useradd --system --home-dir /var/lib/dvbrxd --create-home --shell /usr/sbin/nologin dvbrxd
+    fi
+    getent group video >/dev/null || groupadd --system video
+    usermod -a -G video dvbrxd
+    install -d -o dvbrxd -g video -m 0750 /var/lib/dvbrx-web
+    if [ -d /run/systemd/system ]; then
+        systemctl daemon-reload || true
+        systemctl try-restart dvbrx-web.service || true
+    fi
+    echo "dvbrx-web installed (not enabled): edit /etc/dvbrxd/web.conf, then: systemctl enable --now dvbrx-web"
+fi
+exit 0
