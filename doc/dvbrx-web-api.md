@@ -13,6 +13,9 @@ le groupe est celui du service (`video`). Le protocole est le suivant :
   application regarde une chaîne, sans la perturber ni la verrouiller.
 - **Entrée du B210** : `capture`, `probe` et `monitor start` acceptent un champ facultatif `"antenna"`
   (`"TX/RX"`, `"RX2"`), quand le satellite et le câble arrivent sur deux entrées différentes. Par défaut, c'est l'entrée du service.
+- **Gain fixe** : `probe` et `monitor start` acceptent un champ facultatif `"gain"` (nombre, dB) : le gain
+  automatique est coupé et ce gain est appliqué tant que dure le sondage ou le moniteur (statut `"agc": "manual"`),
+  puis dvbrx reprend son propre réglage (`-G`). Absent, `null` ou `"auto"` : le gain automatique.
 - **Commandes exclusives** : `capture`, `probe` et `monitor start` prennent la radio. Elles échouent avec
   `"error": "busy"` quand une application (tvheadend…) a un accord en cours. On peut forcer avec
   `"force": true` : l'accord en cours est alors interrompu, et il reprendra à la

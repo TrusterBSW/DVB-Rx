@@ -857,6 +857,11 @@ async function alStart(force = false) {
   const body = p.mode === 'ter'
     ? { s: S.sock, delsys: p.delsys, freq: Math.round(p.rf), bandwidth: p.bw, plp: p.plp, force: force_ }
     : { s: S.sock, delsys: p.delsys, freq: Math.round(p.iff), symbol_rate: Math.round(p.rs), volt: p.volt, tone: p.tone, force: force_ };
+  if ($('#alGainMode').value === 'fixed') {
+    const g = parseFloat($('#alGain').value);
+    if (!isNum(g) || g < 0 || g > 120) { toast('Gain invalide (0 à 120 dB)', true); return; }
+    body.gain = g;
+  }
   try {
     const r = await api('/api/monitor/start', body);
     const fresh = !S.mon;
@@ -1099,6 +1104,18 @@ function bind() {
   });
   ['#alTDelsys', '#alTBw', '#alTPlp'].forEach((s) => $(s).addEventListener('change', alCalc));
   $('#alStart').onclick = () => alStart();
+  const gainSync = () => {
+    const fixed = $('#alGainMode').value === 'fixed';
+    $('#alGain').hidden = $('#alGainUnit').hidden = !fixed;
+    try { localStorage.setItem('dvbrxweb.alGain', fixed ? $('#alGain').value : 'auto'); } catch (e) { /* rien */ }
+  };
+  try {
+    const g = localStorage.getItem('dvbrxweb.alGain');
+    if (g && g !== 'auto') { $('#alGainMode').value = 'fixed'; $('#alGain').value = g; }
+  } catch (e) { /* rien */ }
+  gainSync();
+  $('#alGainMode').onchange = () => { gainSync(); if (S.mon) alStart(); };
+  $('#alGain').addEventListener('change', () => { gainSync(); if (S.mon) alStart(); });
   $('#alStop').onclick = () => alStop();
   $('#alSpan').onchange = drawHist;
   $('#alSound').onchange = () => { if (!$('#alSound').checked) soundStop(); };

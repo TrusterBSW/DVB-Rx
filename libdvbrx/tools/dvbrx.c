@@ -776,6 +776,9 @@ struct bridge {
     double ts_mbps;
     int named;              /* the frontend carries the SDR's name */
     double last_usb;        /* last look at the other SDRs on the USB bus */
+    /* a probe or the monitor at a fixed gain: the daemon's gain, put back after */
+    int gain_held, held_auto;
+    double held_gain;
 };
 
 /* ---- several adapters on one wideband capture ----------------------------- */
@@ -1668,6 +1671,11 @@ static void ctl_release(struct bridge* b)
     } else {
         bridge_stop_rx(b);
     }
+    if (b->gain_held) { /* the daemon's own gain again (-G) */
+        b->radio->gain_auto = b->held_auto;
+        b->radio->gain = b->held_gain;
+        b->gain_held = 0;
+    }
     b->mode = 0;
     psi_free(b->psi);
     b->psi = NULL;
@@ -1928,6 +1936,17 @@ static void ctl_request(const char* req, struct sbuf* o)
             free(iq);
             return;
         }
+        /* "gain": a number for a fixed gain (no AGC) while it lasts */
+        const char* gv = json_val(req, "gain");
+        if (gv && *gv != '"' && *gv != 'n') {
+            const struct radio* r = b->radio;
+            const double g = json_num(req, "gain", 0);
+            b->gain_held = 1;
+            b->held_auto = r->gain_auto;
+            b->held_gain = r->gain;
+            b->radio->gain_auto = 0;
+            b->radio->gain = fmax(r->info.gain_min, fmin(r->info.gain_max, g));
+        }
         struct dvbrx_tune t;
         const double sr = json_num(req, "symbol_rate", 0);
         if (!strcmp(cmd, "monitor") && sr <= 0 && !strstr(req, "DVB-T")) {
@@ -1948,6 +1967,7 @@ static void ctl_request(const char* req, struct sbuf* o)
         }
         if (tune_of(req, &t, err, sizeof(err))) {
             b->radio->antenna = ant0;
+            ctl_release(b);
             pthread_mutex_unlock(&ctl_lock);
             sb_printf(o, "{\"ok\": false, \"error\": \"%s\"}", err);
             return;

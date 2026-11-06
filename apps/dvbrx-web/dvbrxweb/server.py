@@ -242,6 +242,10 @@ class Handler(BaseHTTPRequestHandler):
                 if sc.running():
                     raise DvbrxError("un scan est en cours sur ce récepteur : attendez sa fin ou annulez-le")
                 ds = body.get("delsys") or "DVB-S2"
+                gain = body.get("gain")  # gain fixe (dB) ; absent ou vide : automatique
+                gain = None if gain in (None, "", "auto") else float(gain)
+                if gain is not None and not (0 <= gain <= 120):
+                    raise DvbrxError(f"gain invalide : {gain}")
                 if ds in ("DVB-T", "DVB-T2"):  # antenne terrestre : pas de LNB
                     freq = float(body.get("freq") or 0)
                     if not (47e6 <= freq <= 1000e6):
@@ -251,9 +255,9 @@ class Handler(BaseHTTPRequestHandler):
                         raise DvbrxError(f"largeur invalide : {bw}")
                     plp = body.get("plp")
                     plp = int(plp) if plp not in (None, "") and int(plp) >= 0 else -1
-                    sk["client"].monitor_start(ds, freq, 0, 0, bandwidth=bw, plp=plp,
+                    sk["client"].monitor_start(ds, freq, 0, 0, bandwidth=bw, plp=plp, gain=gain,
                                                antenna=app.cfg.antenna_cable, force=bool(body.get("force")))
-                    sk["monitor"] = {"delsys": ds, "freq": freq, "bandwidth": bw, "plp": plp,
+                    sk["monitor"] = {"delsys": ds, "freq": freq, "bandwidth": bw, "plp": plp, "gain": gain,
                                      "volt": None, "tone": None, "started": time.time()}
                     return self.send_json({"ok": True, "monitor": sk["monitor"], "lnb_error": None})
                 if ds not in ("DVB-S", "DVB-S2"):
@@ -263,7 +267,7 @@ class Handler(BaseHTTPRequestHandler):
                     raise DvbrxError(f"fréquence FI hors bande : {freq / 1e6:.1f} MHz")
                 rs = float(body.get("symbol_rate") or 0)
                 ro = float(body.get("rolloff") or (app.cfg.rolloff_s2 if ds == "DVB-S2" else app.cfg.rolloff_s))
-                sk["client"].monitor_start(ds, freq, rs, ro, antenna=app.cfg.antenna_sat,
+                sk["client"].monitor_start(ds, freq, rs, ro, antenna=app.cfg.antenna_sat, gain=gain,
                                            force=bool(body.get("force")))
                 volt = str(body.get("volt", "13"))
                 tone = bool(body.get("tone"))
@@ -275,7 +279,7 @@ class Handler(BaseHTTPRequestHandler):
                         lnb_err = str(e)
                         if "no LNB" in lnb_err:
                             lnb_err = "pas de contrôleur de LNB (dvbrx lancé sans -L)"
-                sk["monitor"] = {"delsys": ds, "freq": freq, "symbol_rate": rs, "rolloff": ro,
+                sk["monitor"] = {"delsys": ds, "freq": freq, "symbol_rate": rs, "rolloff": ro, "gain": gain,
                                  "volt": volt, "tone": tone, "started": time.time()}
                 return self.send_json({"ok": True, "monitor": sk["monitor"], "lnb_error": lnb_err})
             if u.path == "/api/monitor/stop":

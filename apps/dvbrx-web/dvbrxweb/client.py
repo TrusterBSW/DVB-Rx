@@ -103,9 +103,11 @@ class DvbrxClient:
         return self.call(req, timeout=10.0)
 
     def monitor_start(self, delsys, freq, symbol_rate, rolloff, antenna=None, force=False,
-                      bandwidth=None, plp=None):
+                      bandwidth=None, plp=None, gain=None):
         req = {"cmd": "monitor", "action": "start", "delsys": delsys, "freq": int(round(freq)),
                "symbol_rate": int(round(symbol_rate)), "rolloff": rolloff}
+        if gain is not None:  # gain fixe (dB) pendant l'alignement, sinon l'AGC de dvbrx
+            req["gain"] = float(gain)
         if bandwidth:
             req["bandwidth"] = int(bandwidth)
         if plp is not None:

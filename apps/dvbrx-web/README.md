@@ -14,7 +14,7 @@ dépendance externe ni CDN.
 | Constellation | nuage de points avec persistance ; demandé toutes les 500 ms seulement si l'onglet est affiché et la page visible | non |
 | Scan rapide | FFT par fenêtres d’environ 50 MHz (48 utiles) (56 MS/s), détection des canaux (grille de 8 MHz pour le câble, porteuses pour le satellite) ; Sat ON = 4 combinaisons du LNB universel (VL, VH, HL, HH), soit 5 lignes | oui |
 | Scan complet | identification de la norme (raie cyclique de \|x\|² → porteuse unique, sinon OFDM) puis `probe` ; DOCSIS reconnu (6,952 MBd sans PAT ni service) ; NIT exploitée ; export dvbv5 | oui |
-| Alignement (satellite ou terrestre) | moniteur sur une porteuse satellite (combinaison du LNB réglable à la main) ou un multiplex DVB-T/T2 (fréquence ou canal UHF, largeur, PLP), grandes jauges (puissance, SNR, verrouillage), historique, son facultatif | oui |
+| Alignement (satellite ou terrestre) | moniteur sur une porteuse satellite (combinaison du LNB réglable à la main) ou un multiplex DVB-T/T2 (fréquence ou canal UHF, largeur, PLP), grandes jauges (puissance, SNR, verrouillage), historique, son facultatif ; gain automatique ou fixe (sans AGC, les niveaux se comparent d'une position de l'antenne à l'autre) | oui |
 
 Avec plusieurs récepteurs (un démon `dvbrxd@N` par carte), un sélecteur en haut de page les
 présente avec leur carte (« dvbrx 1 — HackRF One 334c64dc39395367 ») ; scans et alignement se
@@ -60,7 +60,7 @@ commenté), `/var/lib/dvbrx-web` et `dvbrx-web.service`, **sans l'activer** :
 | POST | `/api/scan/cancel` `{s}` | annulation |
 | GET | `/api/scan/result?s=N&mode=quick\|full` | dernier résultat (enregistré dans le répertoire de données, rechargé au démarrage) |
 | GET | `/api/export?s=N&kind=cable\|sat` | fichier dvbv5 (téléchargement) |
-| POST | `/api/monitor/start` `{s, delsys, freq (FI, Hz), symbol_rate, volt, tone, force}` | alignement : `monitor start` puis `lnb` |
+| POST | `/api/monitor/start` `{s, delsys, freq (FI, Hz), symbol_rate, volt, tone, gain, force}` | alignement : `monitor start` puis `lnb` (`gain` en dB : gain fixe ; absent : automatique) |
 | POST | `/api/monitor/stop` `{s}` | `monitor stop` |
 | POST | `/api/lnb` `{s, volt, tone}` | commande du LNB |
 

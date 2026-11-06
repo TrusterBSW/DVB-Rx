@@ -130,6 +130,9 @@
         <span class="mono" id="alCalc"></span>
       </div>
       <div class="controls">
+        <label title="Gain fixe : pas d'AGC, les niveaux se comparent d'un réglage de l'antenne à l'autre">Gain
+          <select id="alGainMode"><option value="auto">automatique</option><option value="fixed">fixe</option></select>
+          <input type="number" id="alGain" min="0" max="120" step="1" value="40" style="width:4.5em" hidden> <span id="alGainUnit" hidden>dB</span></label>
         <button class="btn primary" id="alStart">Démarrer</button>
         <button class="btn" id="alStop" disabled>Arrêter</button>
         <label><input type="checkbox" id="alSound"> son (hauteur selon le SNR / niveau)</label>
