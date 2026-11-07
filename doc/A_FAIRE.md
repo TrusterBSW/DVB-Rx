@@ -144,6 +144,17 @@ T, T2, C et le frontal.
   - **Testé** avec une fausse libhackrf (file, repliement, coupe-continu, débordement, délai,
     gains). **Reste à tester sur la carte.**
 
+## Calcul sur GPU (plus tard)
+
+Décharger sur un GPU (Intel intégré d'abord, AMD ou NVIDIA aussi) ce qui s'y prête : le LDPC
+(DVB-S2, T2 : des dizaines de trames en parallèle), les FFT de l'OFDM et le canaliseur multicanal, le
+démappeur, le filtre adapté. Pas les boucles de rétroaction (rythme de Gardner, porteuse DVB-S), qui
+font l'essentiel du DVB-S, ni vraiment le Viterbi. OpenCL ou Vulkan compute (pas CUDA), choisi à
+l'exécution avec repli sur le code actuel, `/dev/dri` à donner aux conteneurs. Le GPU intégré partage
+la mémoire, or le LDPC est limité par la mémoire (8,5 Mo de messages par décodeur à 135/180) : le gain
+y sera plus modeste qu'avec une carte dédiée. Commencer par un banc LDPC en OpenCL sur l'UHD 630 du
+i5-9500 contre l'AVX2 actuel (1-2 jours) avant tout portage (1-2 semaines pour le seul LDPC).
+
 ## Autres
 
 - **Contrôle LNB par ESP32** (objectif d'origine du projet) : protocole

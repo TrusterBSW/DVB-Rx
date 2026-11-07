@@ -27,6 +27,7 @@ typedef float complex cf;
 #define SEARCH_LEN 4096  /* symbols tried for each hypothesis */
 #define SEARCH_MAX_BER 0.2       /* hard-decision mismatch of the best hypothesis */
 #define SEARCH_MAX_CONTRAST 0.5  /* best / median mismatch for its rate */
+#define PLL_BLOCK 8      /* symbols per decision-directed loop update, see pll_run() */
 
 /* ---- receiver state ------------------------------------------------------- */
 
@@ -94,6 +95,10 @@ struct drx_dvbs {
     double omega; /* rad/symbol */
     cf rot;       /* e^(-j phase) */
     float K1, K2;
+    float w_phase[PLL_BLOCK], w_freq[PLL_BLOCK]; /* block loop filter, see pll_run() */
+    cf w;           /* e^(-j w_omega), the rotation per symbol of pll_run() */
+    double w_omega;
+    int w_age;      /* blocks since w was computed exactly */
     float n0;
     long pll_count;
 
@@ -134,6 +139,8 @@ static void* back_thread(void* arg)
     return NULL;
 }
 
+static void pll_weights(drx_dvbs* d);
+
 drx_dvbs* drx_dvbs_new(enum drx_dvbs_rate rate, int threaded)
 {
         drx_dvbs* d = calloc(1, sizeof(*d));
@@ -162,6 +169,7 @@ drx_dvbs* drx_dvbs_new(enum drx_dvbs_rate rate, int threaded)
     const double th = bnt / (z + 1 / (4 * z)), dd = 1 + 2 * z * th + th * th;
     d->K1 = (float)(4 * z * th / dd);
     d->K2 = (float)(4 * th * th / dd);
+    pll_weights(d);
     d->state = ST_ACQ;
     d->threaded = threaded;
     if (threaded)
@@ -251,10 +259,107 @@ static inline cf pll(drx_dvbs* d, cf s)
     }
     const float phi = (float)(d->omega + d->K1 * e);
     d->omega += d->K2 * e;
-    d->rot *= 1.0f - phi * I - 0.5f * phi * phi;
+    /* exact, as pll_run(): a second-order expansion advances by more than
+     * phi at a large offset, and omega would settle off the true frequency */
+    d->rot *= cexpf(-I * phi);
     if ((++d->pll_count & 255) == 0)
         d->rot /= cabsf(d->rot);
     return z;
+}
+
+/* Block loop filter weights, as in pl.c: with L the unit lower triangular
+ * matrix L_it = K1 + K2 (i - 1 - t) (t < i), the errors e measured on a
+ * block with the rotation frozen at its start (advancing by omega only)
+ * are L e', e' those the symbol-by-symbol loop would have seen; its phase
+ * advance K1 sum e' + K2 sum (n - 1 - i) e'_i and frequency step K2 sum e'
+ * are w_phase . e and w_freq . e. */
+static void pll_weights(drx_dvbs* d)
+{
+    const int n = PLL_BLOCK;
+    for (int j = 0; j < n; j++) {
+        double x[PLL_BLOCK]; /* column j of L^-1 */
+        for (int i = 0; i < n; i++) {
+            double v = i == j;
+            for (int t = 0; t < i; t++)
+                v -= (d->K1 + d->K2 * (i - 1 - t)) * x[t];
+            x[i] = v;
+        }
+        double a = 0, b = 0;
+        for (int i = 0; i < n; i++) {
+            a += x[i];
+            b += (n - 1 - i) * x[i];
+        }
+        d->w_phase[j] = (float)(d->K1 * a + d->K2 * b);
+        d->w_freq[j] = (float)(d->K2 * a);
+    }
+}
+
+/* The loop of pll() over n symbols, PLL_BLOCK at a time: the per-symbol
+ * loop is a chain of dependent operations (~11 ns a symbol); here the
+ * symbols of a block are independent (vectorised) and the loop is
+ * updated once per block with the weights of pll_weights(), the same in
+ * the linear (locked) regime. The rotation within a block follows the
+ * whole frequency estimate exactly (powers of e^(-j omega): at a low
+ * symbol rate omega can be tenths of a radian per symbol). */
+static void pll_run(drx_dvbs* d, const cf* s, cf* out, int n)
+{
+    _Static_assert(PLL_BLOCK == 8, "the powers of w below are written for 8");
+    const float c = (float)M_SQRT1_2;
+    int k = 0;
+    for (; k + PLL_BLOCK <= n; k += PLL_BLOCK) {
+        /* e^(-j omega): omega moves by ~1e-5 rad a block, so w follows it by
+         * a small rotation; computed again exactly every 64 blocks, or when
+         * omega jumps (a correction from the front end) */
+        const double dw = d->omega - d->w_omega;
+        if (fabs(dw) > 1e-3 || ++d->w_age >= 64) {
+            d->w = cexpf(-I * (float)d->omega);
+            d->w_age = 0;
+        } else {
+            d->w *= 1.0f - (float)dw * I - 0.5f * (float)(dw * dw);
+        }
+        d->w_omega = d->omega;
+        /* rotations rot w^i, i = 0..7, by doubling (depth 3, not 7) */
+        const cf w1 = d->w, w2 = w1 * w1, w4 = w2 * w2;
+        const cf p[PLL_BLOCK] = { 1.0f, w1, w2, w2 * w1, w4, w4 * w1, w4 * w2, w4 * w2 * w1 };
+        const cf rot = d->rot;
+        /* plain float arrays: GCC vectorises these loops (complex types it
+         * does not) */
+        float rr[PLL_BLOCK], ri[PLL_BLOCK], sr[PLL_BLOCK], si[PLL_BLOCK];
+        for (int i = 0; i < PLL_BLOCK; i++) {
+            const cf r = rot * p[i];
+            rr[i] = crealf(r);
+            ri[i] = cimagf(r);
+            sr[i] = crealf(s[k + i]);
+            si[i] = cimagf(s[k + i]);
+        }
+        float zr[PLL_BLOCK], zi[PLL_BLOCK], e[PLL_BLOCK], q[PLL_BLOCK];
+        for (int i = 0; i < PLL_BLOCK; i++) {
+            zr[i] = sr[i] * rr[i] - si[i] * ri[i];
+            zi[i] = sr[i] * ri[i] + si[i] * rr[i];
+            /* dec = (sign(re) + j sign(im)) / sqrt 2; e = Im(z conj(dec)) */
+            const float dr = zr[i] >= 0 ? c : -c, di = zi[i] >= 0 ? c : -c;
+            e[i] = zi[i] * dr - zr[i] * di;
+            q[i] = (zr[i] - dr) * (zr[i] - dr) + (zi[i] - di) * (zi[i] - di);
+        }
+        float sum = 0, step = 0, err2 = 0;
+        for (int i = 0; i < PLL_BLOCK; i++) {
+            sum += d->w_phase[i] * e[i];
+            step += d->w_freq[i] * e[i];
+            err2 += q[i];
+        }
+        for (int i = 0; i < PLL_BLOCK; i++)
+            out[k + i] = zr[i] + zi[i] * I;
+        /* noise estimate: the block's mean error, with the time constant of
+         * pll()'s (1.6e-3 every 16 symbols) */
+        d->n0 += 1.6e-3f * (PLL_BLOCK / 16.0f) * (err2 / PLL_BLOCK - d->n0);
+        d->rot = rot * p[PLL_BLOCK - 1] * w1 * (1.0f - sum * I - 0.5f * sum * sum);
+        d->omega += step;
+        d->pll_count += PLL_BLOCK;
+        if ((d->pll_count & 255) < PLL_BLOCK)
+            d->rot /= cabsf(d->rot);
+    }
+    for (; k < n; k++)
+        out[k] = pll(d, s[k]);
 }
 
 static void estimate_freq(drx_dvbs* d)
@@ -269,6 +374,7 @@ static void estimate_freq(drx_dvbs* d)
     }
     d->omega = cargf(r) / 4;
     d->rot = 1.0f;
+    d->w_omega = 1e9; /* computed again at the next block */
     d->n0 = 1.0f;
 }
 
@@ -391,10 +497,25 @@ static void stream_symbols(drx_dvbs* d, const cf* z, int n)
         drx_tap_put(d->tap, (const float*)z, n, 4);
     int16_t soft[2 * 256];
     int16_t pairs[512][2];
+    /* soft_bits() as a fixed linear map of (re, im): swap is conj(z),
+     * rot90 z * j (after the swap), so I = a re + b im, Q = c re + d im;
+     * out of the loop, which then vectorises */
+    const float ca = d->rot90 ? 0.0f : 1.0f, cb = d->rot90 ? (d->swap ? 1.0f : -1.0f) : 0.0f;
+    const float cc = d->rot90 ? 1.0f : 0.0f, cd = d->rot90 ? 0.0f : (d->swap ? -1.0f : 1.0f);
+    const float sc = (float)M_SQRT2 * CONV_SOFT_SCALE, mx = CONV_SOFT_MAX;
+    const float* zf = (const float*)z;
     for (int i = 0; i < n; i += 256) {
         const int m = n - i < 256 ? n - i : 256;
-        for (int k = 0; k < m; k++)
-            soft_bits(z[i + k], d->rot90, d->swap, soft + 2 * k);
+        const float* f = zf + 2 * i;
+        for (int k = 0; k < m; k++) {
+            const float re = f[2 * k], im = f[2 * k + 1];
+            /* comparisons, not fminf/fmaxf: those are calls without -ffinite-math-only */
+            float x = (ca * re + cb * im) * sc, y = (cc * re + cd * im) * sc;
+            x = x > mx ? mx : x < -mx ? -mx : x;
+            y = y > mx ? mx : y < -mx ? -mx : y;
+            soft[2 * k] = (int16_t)lrintf(x);
+            soft[2 * k + 1] = (int16_t)lrintf(y);
+        }
         int np = conv_depuncture(&d->dp, soft, 2 * m, pairs);
         for (int k = 0; k < np;) {
             if (!d->cur) {
@@ -446,8 +567,10 @@ void drx_dvbs_process(drx_dvbs* d, const float* sym, int n, drx_dvbs_cb cb, void
             continue;
         }
         if (d->state == ST_SEARCH) {
-            while (i < n && d->nblk < SEARCH_LEN)
-                d->blk[d->nblk++] = pll(d, s[i++]);
+            const int m = n - i < SEARCH_LEN - d->nblk ? n - i : SEARCH_LEN - d->nblk;
+            pll_run(d, s + i, d->blk + d->nblk, m);
+            d->nblk += m;
+            i += m;
             if (d->nblk < SEARCH_LEN)
                 return;
             search(d);
@@ -457,8 +580,7 @@ void drx_dvbs_process(drx_dvbs* d, const float* sym, int n, drx_dvbs_cb cb, void
             continue;
         }
         const int m = n - i < 256 ? n - i : 256;
-        for (int k = 0; k < m; k++)
-            z[k] = pll(d, s[i + k]);
+        pll_run(d, s + i, z, m);
         i += m;
         stream_symbols(d, z, m);
     }

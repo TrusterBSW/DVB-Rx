@@ -48,6 +48,11 @@ dans 56 MHz) : le CPU n'est pas limitant.
    quand sps < 2, ou quand sps n'est pas proche d'un entier :
    **-0,21 cœur** sur les configurations à 2 éch./sym (défaut `-S 2×Rs`).
    **Charge : 1 heure** (+ matrice).
+   **Écarté le 8/11 : faux en conditions réelles.** La mesure du 3/11 était faite à exactement
+   2,000 éch./sym, sans écart d'horloge. Avec 15 ppm (toujours présents entre deux radios), la
+   phase d'échantillonnage parcourt toutes les positions et l'interpolation cubique seule perd
+   3 dB à 2,0 (25,9 contre 28,9 dB sur un DVB-S à 30 dB) ; à 2,048 (61,44 Msps pour 30 Mbd) elle
+   perd 2,1 dB même sans écart. La demi-bande reste nécessaire jusqu'à UP_SPS.
 3. **DVB-S2 sans pilotes : pas d'égalisation.** L'égaliseur n'apprend que sur
    les trames à pilotes. Pour l'APSK sans pilotes à fort débit, on peut
    l'apprendre sur les 90 symboles d'en-tête, ou en mode piloté par les décisions sur les données.
@@ -57,6 +62,37 @@ dans 56 MHz) : le CPU n'est pas limitant.
    une sur 4, puis une sur 16. Les coefficients ne sont gardés que s'ils réduisent
    l'erreur résiduelle d'au moins 0,3 dB par rapport à l'absence d'égalisation. Le filtre
    n'est plus appliqué tant que les coefficients valent l'unité.
+
+## Fait le 8/11/2026 (DVB-S QPSK 7/8 30 Mbd à 61,44 Msps, i5-9500, -t 2)
+
+Total **1,59 → 1,13 cœur (-29 %)**, mesuré par thread sur 10 s (`/proc/<pid>/task/*/stat`), l'ancienne
+et la nouvelle version l'une après l'autre :
+
+| thread | avant | après | quoi |
+|---|---|---|---|
+| drx-plsync | 0,61 | 0,29 | boucle de porteuse DVB-S par blocs de 8 (`pll_run`) + valeurs souples |
+| drx-timing | 0,36 | 0,35 | inchangé (Gardner 0,20, demi-bande 0,12) |
+| principal | 0,33 | 0,29 | lecture du fichier (en direct : la réception USB) |
+| drx-filter | 0,16 | 0,11 | filtre adapté : demi-longueur 1,2/roll-off (≥ 6) au lieu de 10 |
+| arrière (Viterbi, RS) | 0,13 | 0,09 | |
+
+- **Boucle de porteuse DVB-S par blocs** (`dvbs.c`, `pll_run`) : la technique de `frame_pll()` du
+  DVB-S2 (rotation figée sur 8 symboles, poids `w_phase`/`w_freq` équivalents à la boucle
+  symbole par symbole dans le domaine linéaire), en tableaux de réels que GCC vectorise ; rotation
+  exacte (puissances de e^-jω, et `pll()` aussi : son développement d'ordre 2 avançait de plus que
+  φ à fort décalage et ω s'écartait de la vraie fréquence) ; bruit estimé sur la moyenne du bloc.
+  Mêmes paquets et même SNR que l'ancienne boucle aux seuils (1/2 à 3,5-4 dB, 3/4 à 7 dB, 7/8 à
+  7,5 dB), avec du bruit de phase et à 30 dB ; meilleure aux grands décalages (verrouille jusqu'à
+  0,115 cycle/symbole, l'ancienne décrochait à 0,115 et affichait un SNR faux au-delà de 0,05) ;
+  matrice DVB-S 15/15. Le banc en boucle (fichier de 0,16 s) fait une recherche à chaque jonction :
+  une partie du gain mesuré (le Viterbi des hypothèses) n'existe pas sur un flux continu ; la boucle
+  seule passe d'environ 0,32 à 0,17 cœur.
+- **Filtre adapté** (`rrc_delay_for`, mode pont) : 1,2/roll-off au lieu de 2/roll-off et 10 :
+  DVB-S2 0,05 → 24 (40), 0,10 → 12 (20), 0,20 → 6 (10), DVB-S → 6 (10), DVB-C → 8 (13). À 32 dB :
+  au plus 0,15 dB sans égaliseur, rien avec ; DVB-C 256-QAM 0,2 dB à 36 dB. Plus court, ~1 dB de
+  perte (8 à 0,10, 12 à 0,05).
+- **Le Viterbi** ne pèse que 0,09 cœur en DVB-S : ses pistes (4 phases, traceback empaqueté)
+  servent surtout le DVB-T.
 
 ## Pistes CPU (gain estimé, charge)
 

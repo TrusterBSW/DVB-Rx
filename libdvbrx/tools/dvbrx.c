@@ -756,14 +756,16 @@ static int parse_dvbs_rate(const char* s)
 
 /* ---- receiver settings ---------------------------------------------------- */
 
-/* Low roll-offs have slowly decaying RRC tails: keep the truncation loss
- * small without paying for long filters where they are not needed. */
+/* Matched filter half-length (symbols): 1.2 / roll-off, at least 6. Low
+ * roll-offs have slowly decaying RRC tails; measured at 32 dB of SNR (2026-11-08),
+ * against the former 2 / roll-off and 10: DVB-S2 0.05 at 24 (40 before), 0.10 at 12
+ * (20), 0.20 at 6 (10) lose at most 0.15 dB without the equaliser, nothing with it;
+ * DVB-S (0.35) at 6 nothing; DVB-C 256-QAM (0.15) at 8 0.2 dB at 36 dB. Shorter
+ * (8 at 0.10, 12 at 0.05) loses ~1 dB. */
 static int rrc_delay_for(float rolloff)
 {
-    if (rolloff >= 0.2f)
-        return 10;
-    int d = (int)(2.0f / rolloff + 0.5f);
-    return d < 10 ? 10 : d;
+    const int d = (int)(1.2f / rolloff + 0.5f);
+    return d < 6 ? 6 : d;
 }
 
 struct hub;
