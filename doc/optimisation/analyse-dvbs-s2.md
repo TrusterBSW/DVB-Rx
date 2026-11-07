@@ -93,6 +93,17 @@ et la nouvelle version l'une après l'autre :
   perte (8 à 0,10, 12 à 0,05).
 - **Le Viterbi** ne pèse que 0,09 cœur en DVB-S : ses pistes (4 phases, traceback empaqueté)
   servent surtout le DVB-T.
+- **Boucle de rythme par lots : écartée.** Compteurs du thread drx-timing (i5-9500) : 2,32
+  instructions par cycle, ports 0, 1 et 5 occupés à 47, 51 et 38 % : rien n'est saturé, la boucle
+  est limitée par ses dépendances. TDELAY 6 ou 8 au lieu de 4 (plus de symboles en vol) ne change
+  rien (0,35 cœur), et un traitement par lots demanderait des transpositions sur le port 5. Le
+  thread se partage entre Gardner (0,20 cœur) et la demi-bande (0,12, déjà repliée et vectorisée).
+- **Zéro copie en entrée : reporté.** La copie de `drx_mt_push` fait ~490 Mo/s à 61,44 Msps
+  (~0,05 cœur) ; le gain réel dépend du thread de réception (conversion d'UHD, mesure de niveau,
+  copie : trois passes), à mesurer en direct (le B210 n'était plus branché sur l'hôte le 8/11).
+  Piste : recevoir en sc16 et faire conversion, niveau et dépôt dans le bloc en une passe.
+- **Viterbi en 4 phases, traceback empaqueté : reportés** (surtout utiles au DVB-T : ~5 % et
+  ~1-1,5 % de son CPU, voir `dvbt-viterbi-outer.md`).
 
 ## Pistes CPU (gain estimé, charge)
 
