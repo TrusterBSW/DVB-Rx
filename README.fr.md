@@ -74,8 +74,8 @@ Il installe aussi les en-têtes du noyau en cours (le module est construit par D
 aucun service. Ou à la main :
 
 ```bash
-wget https://github.com/TrusterBSW/DVB-Rx/raw/main/releases/dvbrx_0.1.1_amd64.deb
-sudo apt install ./dvbrx_0.1.1_amd64.deb      # + linux-headers-… pour le module (DKMS)
+wget https://github.com/TrusterBSW/DVB-Rx/raw/main/releases/dvbrx_0.1.2_amd64.deb
+sudo apt install ./dvbrx_0.1.2_amd64.deb      # + linux-headers-… pour le module (DKMS)
 ```
 
 Les bibliothèques des radios (libuhd, libbladeRF, libhackrf) sont chargées à l'exécution, quelle que
@@ -91,8 +91,10 @@ journalctl -u dvbrxd@0 -f            # « frontend named "dvbrx B210 31A5B7C" »
 dvbv5-zap -a 0 -c chaines.conf "France 2"      # ou tvheadend : Configuration > DVB Inputs
 ```
 
-Plusieurs radios : `/etc/modprobe.d/dvbrx.conf` (`options dvbrx adapters=2`), un fichier
-`/etc/dvbrxd/N.conf` par radio, désignée par son numéro de série (voir [Cartes](#cartes)).
+Plusieurs radios : `/etc/modprobe.d/dvbrx.conf` (`options dvbrx adapters=2`, lu une fois tous
+les services `dvbrxd@` arrêtés), un fichier `/etc/dvbrxd/N.conf` par radio, désignée par son
+numéro de série (voir [Cartes](#cartes)). Les services chargent le module noyau : `/dev/dvb`
+est vide tant qu'aucun ne tourne.
 
 ## En ligne de commande
 
@@ -348,7 +350,10 @@ une copie des sources :
     sudoedit /etc/dvbrxd/0.conf             # DVBRXD_ARGS="-u type=b200 -L serial:/dev/ttyACM0 -t 3"
     sudo systemctl enable --now dvbrxd@0
 
-Le module est chargé au démarrage, `/dev/dvbrxN` et `/dev/dvb` sont au
+Le module est chargé par le premier service `dvbrxd@N` et déchargé quand le
+dernier s'arrête (`dvbrx-module` : aucun adaptateur dans `/dev/dvb` tant
+qu'aucun récepteur ne tourne ; à la main, `sudo modprobe dvbrx`), `/dev/dvbrxN`
+et `/dev/dvb` sont au
 groupe `video`, le service `dvbrxd@N` lance `/usr/local/bin/dvbrx` (paquet :
 `/usr/bin/dvbrx`) sous l'utilisateur `dvbrxd`. Testé avec
 dvbv5-scan / dvbv5-zap et VLC (`cvlc dvb-s2://frequency=11778000000

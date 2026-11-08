@@ -352,6 +352,18 @@ and ordered before tvheadend, so that the name is in place when tvheadend
 starts; a radio swapped while tvheadend is running only appears after
 tvheadend restarts.
 .PP
+The kernel module is loaded by the first
+.BR dvbrxd@ \fIN\fR
+service that starts and unloaded when the last one stops
+.RB ( dvbrx\-module ):
+/dev/dvb holds no adapter while no receiver runs. It stays loaded when a
+service fails (systemd restarts it) and while an application keeps an
+adapter open. The number of adapters is read when the module loads, and all
+of them exist as soon as one service runs. Without the service (dvbrx
+.B \-d
+by hand):
+.BR "modprobe dvbrx" .
+.PP
 Tick
 .B Power save
 on the dvbrx frontends: the radio is released a few seconds after viewing
@@ -421,7 +433,9 @@ service
 .B /etc/modprobe.d/dvbrx.conf
 Number of adapters of the module
 .RB ( "options dvbrx adapters=" \fIN\fR,
-1 to 8).
+1 to 8), taken when the module loads: once every
+.B dvbrxd@
+service has stopped.
 .TP
 .BI /run/dvbrx/usb\- N
 USB bandwidth used by daemon

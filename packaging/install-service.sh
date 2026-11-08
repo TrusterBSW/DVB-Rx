@@ -41,6 +41,7 @@ make -C libdvbrx build/dvbrx
 install -D -m 0755 libdvbrx/build/dvbrx /usr/local/bin/dvbrx
 ln -sf dvbrx /usr/local/bin/dvbrxd   # former name
 install -D -m 0755 packaging/dvbrx-irq-pin /usr/local/sbin/dvbrx-irq-pin
+install -D -m 0755 packaging/dvbrx-module /usr/local/sbin/dvbrx-module
 install -D -m 0644 packaging/dvbrxd-cpu.conf.example /usr/local/share/doc/dvbrx/dvbrxd-cpu.conf.example
 install -D -m 0644 README.md /usr/local/share/doc/dvbrx/README.md
 install -D -m 0644 README.fr.md /usr/local/share/doc/dvbrx/README.fr.md
@@ -57,7 +58,7 @@ cp kernel/dvbrx.c kernel/dvbrx_ioctl.h kernel/Kbuild kernel/Makefile kernel/dkms
 sed -i "s/^PACKAGE_VERSION=.*/PACKAGE_VERSION=\"$VERSION\"/" /usr/src/dvbrx-$VERSION/dkms.conf
 dkms remove -m dvbrx -v $VERSION --all >/dev/null 2>&1 || true
 dkms install -m dvbrx -v $VERSION
-echo dvbrx > /etc/modules-load.d/dvbrx.conf
+rm -f /etc/modules-load.d/dvbrx.conf   # loaded by the dvbrxd@N services (dvbrx-module)
 echo "options dvbrx adapters=$ADAPTERS" > /etc/modprobe.d/dvbrx.conf
 
 install -D -m 0644 packaging/60-dvbrx.rules /etc/udev/rules.d/60-dvbrx.rules
@@ -76,6 +77,8 @@ done
 install -D -m 0644 packaging/dvbrxd@.service /etc/systemd/system/dvbrxd@.service
 systemctl daemon-reload
 
-modprobe dvbrx
-udevadm trigger --subsystem-match=misc --action=add
+# the module is loaded by the first dvbrxd@N service: unloaded now if none runs (new build, new
+# number of adapters), else at the next stop of the last one
+systemctl list-units --no-legend --state=active 'dvbrxd@*' | grep -q . || rmmod dvbrx 2>/dev/null || true
+systemctl try-restart 'dvbrxd@*.service' || true
 echo "installed; edit /etc/dvbrxd/N.conf, then: systemctl enable --now dvbrxd@0"

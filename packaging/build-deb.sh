@@ -65,7 +65,7 @@ lib=$ROOT/usr/lib/dvbrx
 src=$ROOT/usr/src/dvbrx-$UPSTREAM
 doc=$ROOT/usr/share/doc/dvbrx
 install -d "$lib" "$src" "$doc/examples" "$ROOT/usr/bin" "$ROOT/usr/sbin" "$ROOT/usr/lib/systemd/system" \
-           "$ROOT/usr/lib/udev/rules.d" "$ROOT/usr/lib/modules-load.d" "$ROOT/etc/modprobe.d" "$ROOT/DEBIAN"
+           "$ROOT/usr/lib/udev/rules.d" "$ROOT/etc/modprobe.d" "$ROOT/DEBIAN"
 for v in v2 v3 v4; do
     make -C libdvbrx clean >/dev/null
     make -C libdvbrx build/dvbrx MARCH=x86-64-$v >/dev/null
@@ -73,11 +73,10 @@ for v in v2 v3 v4; do
 done
 strip --strip-unneeded "$lib"/dvbrx-x86-64-*
 install -m 755 packaging/dvbrx "$ROOT/usr/bin/"
-install -m 755 packaging/dvbrx-irq-pin "$ROOT/usr/sbin/"
-sed -e 's|/usr/local/bin/dvbrx|/usr/bin/dvbrx|' -e 's|^Documentation=.*|Documentation=man:dvbrx(8)|' \
+install -m 755 packaging/dvbrx-irq-pin packaging/dvbrx-module "$ROOT/usr/sbin/"
+sed -e 's|/usr/local/bin/dvbrx|/usr/bin/dvbrx|' -e 's|/usr/local/sbin/|/usr/sbin/|' -e 's|^Documentation=.*|Documentation=man:dvbrx(8)|' \
     packaging/dvbrxd@.service > "$ROOT/usr/lib/systemd/system/dvbrxd@.service"
 install -m 644 packaging/60-dvbrx.rules "$ROOT/usr/lib/udev/rules.d/"
-echo dvbrx > "$ROOT/usr/lib/modules-load.d/dvbrx.conf"
 printf '# number of /dev/dvb adapters (1 to 8), one radio and one dvbrxd@N service each\noptions dvbrx adapters=1\n' \
     > "$ROOT/etc/modprobe.d/dvbrx.conf"
 install -m 644 kernel/dvbrx.c kernel/dvbrx_ioctl.h kernel/Kbuild kernel/Makefile "$src/"

@@ -4,7 +4,7 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/TrusterBSW/DVB-Rx/main/install.sh | sudo sh
 #   curl -fsSL https://raw.githubusercontent.com/TrusterBSW/DVB-Rx/main/install.sh | sudo sh -s -- --web
-#   sudo ./install.sh --deb dist/dvbrx_0.1.1_amd64.deb        (a package built here, see packaging/)
+#   sudo ./install.sh --deb dist/dvbrx_0.1.2_amd64.deb        (a package built here, see packaging/)
 #
 # Options:
 #   --web          also install dvbrx-web, the web supervision page (installed, not enabled)
@@ -133,19 +133,25 @@ if [ -n "$ADAPTERS" ]; then
         [ -f "/etc/dvbrxd/$i.conf" ] || install -m 0644 /usr/share/doc/dvbrx/examples/dvbrxd.conf "/etc/dvbrxd/$i.conf"
         i=$((i + 1))
     done
-    if ! systemctl list-units --state=active --no-legend 'dvbrxd@*' 2>/dev/null | grep -q .; then
+    # the module is loaded by the dvbrxd@N services: the number is taken when they start again
+    if systemctl list-units --state=active --no-legend 'dvbrxd@*' 2>/dev/null | grep -q .; then
+        say "adapters: services running, the new number is taken once every dvbrxd@ has stopped"
+    else
         rmmod dvbrx 2>/dev/null || true
     fi
-    modprobe dvbrx 2>/dev/null || true
     say "adapters: $ADAPTERS (/etc/modprobe.d/dvbrx.conf)"
 fi
 
 # what is there
 say "$(dvbrx --version)"
-if [ -e /sys/module/dvbrx ]; then
-    say "kernel module: loaded, $(ls -d /dev/dvb/adapter* 2>/dev/null | wc -l) adapter(s) in /dev/dvb"
+if modinfo -k "$(uname -r)" dvbrx >/dev/null 2>&1; then
+    if [ -e /sys/module/dvbrx ]; then
+        say "kernel module: built, loaded, $(ls -d /dev/dvb/adapter* 2>/dev/null | wc -l) adapter(s) in /dev/dvb"
+    else
+        say "kernel module: built for $(uname -r) (loaded by dvbrxd@N when it starts, unloaded when the last one stops)"
+    fi
 else
-    say "kernel module: not loaded (dkms status; modprobe dvbrx)"
+    say "kernel module: not built for $(uname -r) (dkms status)"
 fi
 libs=""
 ldconfig -p | grep -q 'libuhd\.so' && libs="$libs uhd"
@@ -168,7 +174,7 @@ cat <<'EOF'
 
 Next:
   sudoedit /etc/dvbrxd/0.conf              the radio of adapter 0, e.g. DVBRXD_ARGS="-u type=b200 -G auto"
-  sudo systemctl enable --now dvbrxd@0     /dev/dvb/adapter0, now and at every boot
+  sudo systemctl enable --now dvbrxd@0     /dev/dvb/adapter0, now and at every boot (it loads the module)
   journalctl -u dvbrxd@0 -f                the receiver's log
   man dvbrx                                options, radios, several radios, USB bandwidth
 EOF

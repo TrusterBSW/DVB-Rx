@@ -74,8 +74,8 @@ It also installs the headers of the running kernel (the module is built by DKMS)
 service. Or by hand:
 
 ```bash
-wget https://github.com/TrusterBSW/DVB-Rx/raw/main/releases/dvbrx_0.1.1_amd64.deb
-sudo apt install ./dvbrx_0.1.1_amd64.deb      # + linux-headers-… for the module (DKMS)
+wget https://github.com/TrusterBSW/DVB-Rx/raw/main/releases/dvbrx_0.1.2_amd64.deb
+sudo apt install ./dvbrx_0.1.2_amd64.deb      # + linux-headers-… for the module (DKMS)
 ```
 
 The radio libraries (libuhd, libbladeRF, libhackrf) are loaded at run time, whatever their version
@@ -91,8 +91,10 @@ journalctl -u dvbrxd@0 -f            # 'frontend named "dvbrx B210 31A5B7C"'
 dvbv5-zap -a 0 -c channels.conf "France 2"      # or tvheadend: Configuration > DVB Inputs
 ```
 
-Several radios: `/etc/modprobe.d/dvbrx.conf` (`options dvbrx adapters=2`), one
-`/etc/dvbrxd/N.conf` file per radio, designated by its serial number (see [Radios](#radios)).
+Several radios: `/etc/modprobe.d/dvbrx.conf` (`options dvbrx adapters=2`, taken once every
+`dvbrxd@` service has stopped), one `/etc/dvbrxd/N.conf` file per radio, designated by its
+serial number (see [Radios](#radios)). The services load the kernel module: `/dev/dvb` is
+empty while none runs.
 
 ## Command line
 
@@ -348,7 +350,9 @@ the sources:
     sudoedit /etc/dvbrxd/0.conf             # DVBRXD_ARGS="-u type=b200 -L serial:/dev/ttyACM0 -t 3"
     sudo systemctl enable --now dvbrxd@0
 
-The module is loaded at boot, `/dev/dvbrxN` and `/dev/dvb` belong to the
+The module is loaded by the first `dvbrxd@N` service and unloaded when the last
+one stops (`dvbrx-module`: no `/dev/dvb` adapter while no receiver runs; by
+hand, `sudo modprobe dvbrx`), `/dev/dvbrxN` and `/dev/dvb` belong to the
 `video` group, and the `dvbrxd@N` service runs `/usr/local/bin/dvbrx`
 (package: `/usr/bin/dvbrx`) as the `dvbrxd` user. Tested with
 dvbv5-scan / dvbv5-zap and VLC (`cvlc dvb-s2://frequency=11778000000

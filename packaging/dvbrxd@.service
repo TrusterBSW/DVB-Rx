@@ -1,11 +1,10 @@
 [Unit]
 Description=dvbrx SDR DVB-S/S2/S2X receiver for /dev/dvb/adapter%i
 Documentation=file:///usr/local/share/doc/dvbrx/README.md
-After=systemd-modules-load.service systemd-udev-settle.service
+After=systemd-udev-settle.service
 # the frontend is named after the SDR ("dvbrx B210 31A5B7C") once the
 # daemon is ready: tvheadend reads the name when it finds the adapter
 Before=tvheadend.service
-ConditionPathExists=/dev/dvbrx%i
 
 [Service]
 Type=notify
@@ -18,7 +17,11 @@ EnvironmentFile=/etc/dvbrxd/%i.conf
 RuntimeDirectory=dvbrx
 RuntimeDirectoryMode=0750
 RuntimeDirectoryPreserve=yes
+# the kernel module is loaded by the first instance and unloaded by the last
+# one, so /dev/dvb is empty while no receiver runs ("+": as root)
+ExecStartPre=+/usr/local/sbin/dvbrx-module load %i
 ExecStart=/usr/local/bin/dvbrx -d %i $DVBRXD_ARGS
+ExecStopPost=+/usr/local/sbin/dvbrx-module unload %i
 Restart=on-failure
 RestartSec=2
 # the receiver is soft real time: favour it over batch work

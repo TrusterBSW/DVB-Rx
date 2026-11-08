@@ -39,17 +39,20 @@ if [ "$1" = configure ]; then
     fi
     if [ -d /run/systemd/system ]; then
         systemctl daemon-reload || true
-        if modprobe dvbrx 2>/dev/null; then
-            udevadm trigger --subsystem-match=misc --action=add 2>/dev/null || true
-            # running daemons get the new binary
+        # the module follows the dvbrxd@N services (dvbrx-module): running daemons get the new
+        # binary and, when the last one stops, the new module; with none running, an older module
+        # (or one loaded at boot by a former version) goes now
+        if systemctl list-units --no-legend --state=active 'dvbrxd@*' 2>/dev/null | grep -q .; then
             systemctl try-restart 'dvbrxd@*.service' || true
+        else
+            rmmod dvbrx 2>/dev/null || true
         fi
     fi
     cat <<EOF
 dvbrx installed. Next:
-  - the number of adapters: /etc/modprobe.d/dvbrx.conf (then: rmmod dvbrx; modprobe dvbrx)
+  - the number of adapters: /etc/modprobe.d/dvbrx.conf (taken when the services start again)
   - the SDR of adapter N: /etc/dvbrxd/N.conf (examples in /usr/share/doc/dvbrx/examples)
-  - systemctl enable --now dvbrxd@0
+  - systemctl enable --now dvbrxd@0 (it loads the kernel module: /dev/dvb/adapter0)
   - man dvbrx
 EOF
 fi

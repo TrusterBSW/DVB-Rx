@@ -349,6 +349,19 @@ et ordonné avant tvheadend, pour que le nom soit en place quand tvheadend
 démarre ; une carte changée tvheadend en marche n'apparaît qu'après le
 redémarrage de tvheadend.
 .PP
+Le module noyau est chargé par le premier service
+.BR dvbrxd@ \fIN\fR
+qui démarre et déchargé quand le dernier s'arrête
+.RB ( dvbrx\-module ) :
+/dev/dvb ne contient aucun adaptateur tant qu'aucun récepteur ne tourne. Il
+reste chargé quand un service échoue (systemd le relance) et tant qu'une
+application garde un adaptateur ouvert. Le nombre d'adaptateurs est lu au
+chargement du module, et tous existent dès qu'un service tourne. Sans le
+service (dvbrx
+.B \-d
+à la main) :
+.BR "modprobe dvbrx" .
+.PP
 Cocher
 .B Power save
 sur les frontends dvbrx : la radio est libérée quelques secondes après la fin
@@ -419,7 +432,9 @@ Options du service
 .B /etc/modprobe.d/dvbrx.conf
 Nombre d'adaptateurs du module
 .RB ( "options dvbrx adapters=" \fIN\fR,
-1 à 8).
+1 à 8), lu au chargement du module : une fois tous les services
+.B dvbrxd@
+arrêtés.
 .TP
 .BI /run/dvbrx/usb\- N
 Débit USB utilisé par le démon

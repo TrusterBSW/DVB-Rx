@@ -1,0 +1,47 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+# The dvbrx kernel module follows the dvbrxd@N services, so that /dev/dvb holds no adapter
+# while no receiver runs:
+#   dvbrx-module load N     (ExecStartPre) loads the module, checks that adapter N exists
+#   dvbrx-module unload N   (ExecStopPost) unloads it when the last dvbrxd@ instance stops
+# The module is kept when the service failed (systemd restarts it: the adapters would vanish and
+# come back), and when an application still has an adapter open (rmmod refuses).
+set -u
+cmd=${1:-} n=${2:-}
+case "$cmd:$n" in
+load:[0-9]* | unload:[0-9]*) ;;
+*) echo "usage: dvbrx-module load|unload N" >&2; exit 2 ;;
+esac
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+# one at a time: an instance starting (state "activating") is seen by one stopping
+exec 9>/run/dvbrx-module.lock
+flock -w 30 9 || true
+
+if [ "$cmd" = load ]; then
+    if ! modprobe dvbrx; then
+        echo "dvbrx-module: the dvbrx kernel module does not load (dkms status; the headers of $(uname -r))" >&2
+        exit 1
+    fi
+    # the node exists at once (devtmpfs); its group (video, for the dvbrxd user) comes from udev
+    udevadm settle --timeout=10 2>/dev/null || true
+    if [ ! -e "/dev/dvbrx$n" ]; then
+        a=$(cat /sys/module/dvbrx/parameters/adapters 2>/dev/null || echo "?")
+        echo "dvbrx-module: no adapter $n: the module has $a (options dvbrx adapters= in /etc/modprobe.d/dvbrx.conf;" >&2
+        echo "              it takes effect once every dvbrxd@ service has stopped)" >&2
+        exit 1
+    fi
+    exit 0
+fi
+
+# unload: only after a clean stop
+[ "${SERVICE_RESULT:-success}" = success ] || exit 0
+others=$(systemctl list-units --no-legend --plain --state=active,activating,reloading 'dvbrxd@*.service' 2>/dev/null |
+         awk '{print $1}' | grep -v -x "dvbrxd@$n.service")
+[ -z "$others" ] || exit 0
+[ -e /sys/module/dvbrx ] || exit 0
+if rmmod dvbrx 2>/dev/null; then
+    echo "dvbrx-module: no dvbrxd@ service left, kernel module unloaded (/dev/dvb emptied)"
+else
+    echo "dvbrx-module: kernel module kept: an adapter is still open (tvheadend?)"
+fi
+exit 0
