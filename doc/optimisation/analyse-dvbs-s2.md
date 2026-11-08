@@ -73,7 +73,7 @@ et la nouvelle version l'une après l'autre :
 | drx-plsync | 0,61 | 0,29 | boucle de porteuse DVB-S par blocs de 8 (`pll_run`) + valeurs souples |
 | drx-timing | 0,36 | 0,35 | inchangé (Gardner 0,20, demi-bande 0,12) |
 | principal | 0,33 | 0,29 | lecture du fichier (en direct : la réception USB) |
-| drx-filter | 0,16 | 0,11 | filtre adapté : demi-longueur 1,2/roll-off (≥ 6) au lieu de 10 |
+| drx-filter | 0,16 | 0,11 | filtre adapté : demi-longueur 6 au lieu de 10 (règle 1,6/roll-off, 6 à 24) |
 | arrière (Viterbi, RS) | 0,13 | 0,09 | |
 
 - **Boucle de porteuse DVB-S par blocs** (`dvbs.c`, `pll_run`) : la technique de `frame_pll()` du
@@ -87,10 +87,27 @@ et la nouvelle version l'une après l'autre :
   matrice DVB-S 15/15. Le banc en boucle (fichier de 0,16 s) fait une recherche à chaque jonction :
   une partie du gain mesuré (le Viterbi des hypothèses) n'existe pas sur un flux continu ; la boucle
   seule passe d'environ 0,32 à 0,17 cœur.
-- **Filtre adapté** (`rrc_delay_for`, mode pont) : 1,2/roll-off au lieu de 2/roll-off et 10 :
-  DVB-S2 0,05 → 24 (40), 0,10 → 12 (20), 0,20 → 6 (10), DVB-S → 6 (10), DVB-C → 8 (13). À 32 dB :
-  au plus 0,15 dB sans égaliseur, rien avec ; DVB-C 256-QAM 0,2 dB à 36 dB. Plus court, ~1 dB de
-  perte (8 à 0,10, 12 à 0,05).
+- **Filtre adapté** (`drx_frontend_cfg_default`, donc mode pont, fichiers et matrices) : demi-longueur
+  1,6/roll-off bornée à 6..24 symboles, au lieu de 10 partout : DVB-S2 0,05 → 24, 0,10 → 16,
+  0,20 → 8, DVB-S → 6, DVB-C → 11. Une première règle 1,2/roll-off (6 à 0,20, 12 à 0,10) perdait un
+  peu près du seuil au débit d'échantillonnage minimal ; balayage (3 tirages, échecs BCH, QPSK 3/4,
+  8PSK 3/4, 32APSK 4/5) : à 2 éch./symbole la longueur ne change rien ; à 1,34 éch./symbole et
+  0,20, 6 → 7/13/35, 8 → 4/3/24, 10 → 10/5/32 ; à 1,23 et 0,10, 12 → 1/0/27, 16 → 4/0/6,
+  20 → 5/0/15. À 32 dB : au plus 0,15 dB sans égaliseur.
+- **Non-régression** (`tests/regress.py`, ancienne 6022c9e contre nouvelle, même fichier décodé par
+  les deux, 15 ppm d'horloge, décalage de porteuse, au point de la matrice et 1 à 1,5 dB plus bas) :
+  - DVB-S, 40 cas (5 rendements, 1,5 / 2 / 2,048 / 2,5 éch./symbole) : 39 identiques, 1 signalé,
+    refait sur 5 tirages : sorties identiques ;
+  - DVB-C, 40 cas : 37 identiques, 2 mieux, 1 à la limite (256-QAM 1,278 éch./symbole, 20 erreurs
+    contre 14 sur 4 050 paquets) ;
+  - DVB-S2, 84 cas (7 vecteurs, roll-off 0,20 / 0,10 / 0,05, 2 éch./symbole et minimal) : totaux
+    paquets de la nouvelle / de l'ancienne : 0,05 +30 % (minimal) et +8 % (2), 0,10 +6 % et +0,5 %,
+    0,20 +1,3 % et +0,2 %, moins d'échecs BCH dans chaque groupe ; 8 cas isolés à quelques erreurs
+    près, au seuil, sur un tirage.
+  - Bout en bout par `/dev/dvb` (`tests/bridge_file.sh` : démon `-d 1 -F`, `dvbv5-zap`, TS
+    enregistré 15 s, en temps réel) : DVB-S 7/8, DVB-C 64-QAM, DVB-S2 8PSK 0,20 et QPSK 0,05 à
+    1,17 éch./symbole se verrouillent, sans perte d'échantillons ; mêmes paquets et mêmes erreurs
+    (raccords de la boucle du fichier) que l'ancienne version, DVB-S2 0,05 un peu moins d'échecs BCH.
 - **Le Viterbi** ne pèse que 0,09 cœur en DVB-S : ses pistes (4 phases, traceback empaqueté)
   servent surtout le DVB-T.
 - **Boucle de rythme par lots : écartée.** Compteurs du thread drx-timing (i5-9500) : 2,32

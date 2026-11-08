@@ -107,7 +107,15 @@ void drx_frontend_cfg_default(drx_frontend_cfg* cfg, float sps, float rolloff)
 {
     cfg->sps = sps;
     cfg->rolloff = rolloff;
-    cfg->rrc_delay = 10;
+    /* Matched filter half-length (symbols): 1.6 / roll-off, within 6 .. 24.
+     * Measured near the threshold (2026-11-08, 3 noise draws, DVB-S2 QPSK,
+     * 8PSK, 32APSK): at 2 samples per symbol the length changes nothing
+     * (6 to 10 at 0.20, 12 to 20 at 0.10); at the least rate (1.34, 1.23)
+     * 8 at 0.20 and 16 at 0.10 give the fewest BCH failures, shorter and
+     * longer both more; at 0.05, 24 does better than the former 40 in 25
+     * cases of 28. DVB-S (0.35) gets 6, DVB-C (0.15) 11: no change found. */
+    const int d = (int)(1.6f / rolloff + 0.5f);
+    cfg->rrc_delay = d < 6 ? 6 : d > 24 ? 24 : d;
     /* The Gardner detector's self-noise grows quickly as the roll-off
      * shrinks; the loop only has to follow a clock offset of a few ppm, so
      * narrow it accordingly (MER floor about 40 dB down to 0.05). */
