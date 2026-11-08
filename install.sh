@@ -4,7 +4,7 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/TrusterBSW/DVB-Rx/main/install.sh | sudo sh
 #   curl -fsSL https://raw.githubusercontent.com/TrusterBSW/DVB-Rx/main/install.sh | sudo sh -s -- --web
-#   sudo ./install.sh --deb dist/dvbrx_0.1.0_amd64.deb        (a package built here, see packaging/)
+#   sudo ./install.sh --deb dist/dvbrx_0.1.1_amd64.deb        (a package built here, see packaging/)
 #
 # Options:
 #   --web          also install dvbrx-web, the web supervision page (installed, not enabled)

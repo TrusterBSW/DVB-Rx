@@ -74,8 +74,8 @@ Il installe aussi les en-têtes du noyau en cours (le module est construit par D
 aucun service. Ou à la main :
 
 ```bash
-wget https://github.com/TrusterBSW/DVB-Rx/raw/main/releases/dvbrx_0.1.0_amd64.deb
-sudo apt install ./dvbrx_0.1.0_amd64.deb      # + linux-headers-… pour le module (DKMS)
+wget https://github.com/TrusterBSW/DVB-Rx/raw/main/releases/dvbrx_0.1.1_amd64.deb
+sudo apt install ./dvbrx_0.1.1_amd64.deb      # + linux-headers-… pour le module (DKMS)
 ```
 
 Les bibliothèques des radios (libuhd, libbladeRF, libhackrf) sont chargées à l'exécution, quelle que

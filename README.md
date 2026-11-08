@@ -74,8 +74,8 @@ It also installs the headers of the running kernel (the module is built by DKMS)
 service. Or by hand:
 
 ```bash
-wget https://github.com/TrusterBSW/DVB-Rx/raw/main/releases/dvbrx_0.1.0_amd64.deb
-sudo apt install ./dvbrx_0.1.0_amd64.deb      # + linux-headers-… for the module (DKMS)
+wget https://github.com/TrusterBSW/DVB-Rx/raw/main/releases/dvbrx_0.1.1_amd64.deb
+sudo apt install ./dvbrx_0.1.1_amd64.deb      # + linux-headers-… for the module (DKMS)
 ```
 
 The radio libraries (libuhd, libbladeRF, libhackrf) are loaded at run time, whatever their version
