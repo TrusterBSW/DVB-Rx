@@ -33,7 +33,8 @@ Requête : `{"cmd": "status"}`
            "freq": 586000000, "rate": 10240000, "bandwidth": 9020000,
            "gain": 50, "agc": "level|search|best|manual", "level_dbfs": -24.1,
            "input_dbm": -74.1, "overflows": 0, "filled": 0,
-           "lnb": {"present": false, "volt": "off", "tone": false}},
+           "lnb": {"present": true, "volt": "13|18|off", "tone": false,
+                   "controller": "dvbrx-lnb 1 1 volt13,volt18,tone,burst,diseqc"}},
  "channels": [
    {"adapter": 0, "state": "idle|tuned|probe|monitor",
     "delsys": "DVB-T2", "freq": 586000000,

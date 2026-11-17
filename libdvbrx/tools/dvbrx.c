@@ -51,7 +51,7 @@
  *               udp://HOST:PORT
  *   -d N        DVB bridge on /dev/dvbrxN
  *   -L LNB      LNB controller: "none" (default), "serial:/dev/ttyACM0" or
- *               "udp:HOST:PORT" (text protocol, see doc/lnb-protocol.md)
+ *               "udp:HOST[:PORT]" (port 5199; text protocol, see doc/lnb-protocol.md)
  *   -n N        bridge mode: adapters N, N+1... on one wideband capture
  *   -W HZ       that capture's rate (default 30.72e6)
  *   -m CHANNEL  standalone: one multiplex of the capture (repeatable),
@@ -658,90 +658,297 @@ static void print_stats(drx_mt* mt, const struct radio* r, double t0, double sym
             r->file ? 0.0f : r->level_dbfs, r->clip_ppm > 0 ? " CLIP" : "", r->file ? 0.0 : r->gain);
 }
 
-/* ---- LNB controller ------------------------------------------------------- */
+/* ---- LNB controller (doc/lnb-protocol.md) --------------------------------- */
+
+enum { LNB_OFF = 1, LNB_DISEQC = 2, LNB_BURST = 4 };
 
 struct lnb {
-    int fd; /* -1: no controller */
+    int on; /* a controller is configured (-L) */
+    int fd; /* -1: not open (yet) */
     int is_udp;
+    char path[256], host[256], port[16];
+    /* HELLO: 1 for "dvbrx-lnb 1" (numbered commands, capabilities), 0 for
+     * a plain controller, -1 not answered yet */
+    int proto;
+    unsigned caps;
+    char ident[128];
+    unsigned seq;
+    pthread_mutex_t mu; /* one exchange at a time (adapters, control socket) */
     /* last state set, for adapters sharing the LNB (-1: unknown) */
     int voltage, tone;
     uint8_t diseqc[6];
     int diseqc_len;
 };
 
+static void lnb_close(struct lnb* l)
+{
+    if (l->fd >= 0)
+        close(l->fd);
+    l->fd = -1;
+}
+
+static int lnb_connect(struct lnb* l)
+{
+    if (l->fd >= 0)
+        return 0;
+    if (!l->is_udp) {
+        /* O_NONBLOCK: open does not wait for the carrier; reads follow poll */
+        l->fd = open(l->path, O_RDWR | O_NOCTTY | O_NONBLOCK);
+        if (l->fd < 0)
+            return -1;
+        /* DTR and RTS are left as open() sets them (both up): on the ESP32
+         * USB-Serial-JTAG, RTS up with DTR down resets the chip, and closing
+         * lowers both at once (no reset) */
+        struct termios t;
+        if (!tcgetattr(l->fd, &t)) {
+            cfmakeraw(&t);
+            cfsetspeed(&t, B115200);
+            t.c_cflag |= CLOCAL | CREAD;
+            tcsetattr(l->fd, TCSANOW, &t);
+        }
+        return 0;
+    }
+    /* resolved at each connection: the controller may get a new address
+     * (DHCP, NAME.local through mDNS) */
+    struct addrinfo hints = { .ai_family = AF_UNSPEC, .ai_socktype = SOCK_DGRAM }, *ai;
+    if (getaddrinfo(l->host, l->port, &hints, &ai))
+        return -1;
+    l->fd = socket(ai->ai_family, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    if (l->fd >= 0 && connect(l->fd, ai->ai_addr, ai->ai_addrlen))
+        lnb_close(l);
+    freeaddrinfo(ai);
+    return l->fd < 0 ? -1 : 0;
+}
+
+/* One exchange: sends cmd (numbered "#n " once HELLO said "dvbrx-lnb 1"),
+ * waits up to timeout s for its reply, skipping every other line (firmware
+ * logs, boot messages, late replies). In UDP the datagram is sent again
+ * every 300 ms with the same number (the controller does not run a repeat
+ * twice). The text after OK / ERR goes to out. 0 for OK, -EIO for ERR,
+ * -ETIMEDOUT without a reply. */
+static int lnb_xfer(struct lnb* l, const char* cmd, int numbered, double timeout, char* out, size_t outsz)
+{
+    if (out && outsz)
+        out[0] = 0;
+    if (lnb_connect(l))
+        return -ETIMEDOUT;
+    char req[128], tag[16] = "";
+    if (numbered)
+        snprintf(tag, sizeof(tag), "#%u ", ++l->seq);
+    const int n = snprintf(req, sizeof(req), "%s%s\n", tag, cmd);
+    /* what was there before is not the reply */
+    if (l->is_udp) {
+        char junk[256];
+        while (recv(l->fd, junk, sizeof(junk), MSG_DONTWAIT) > 0) {
+        }
+    } else {
+        tcflush(l->fd, TCIFLUSH);
+    }
+    const double t0 = now(), deadline = t0 + timeout;
+    double resend = 0;
+    char buf[512];
+    size_t got = 0;
+    for (;;) {
+        const double t = now();
+        if (t >= deadline)
+            return -ETIMEDOUT;
+        if (t >= resend && (!resend || l->is_udp)) {
+            if (write(l->fd, req, n) != n && !l->is_udp) {
+                lnb_close(l); /* unplugged, or the ESP reset (USB enumerates again) */
+                return -ETIMEDOUT;
+            }
+            resend = t + 0.3;
+        }
+        const double until = l->is_udp && resend < deadline ? resend : deadline;
+        struct pollfd p = { .fd = l->fd, .events = POLLIN };
+        const int pr = poll(&p, 1, (int)((until - t) * 1e3) + 1);
+        if (pr < 0 && errno != EINTR)
+            return -ETIMEDOUT;
+        if (pr <= 0)
+            continue;
+        if (l->is_udp && (p.revents & POLLERR)) {
+            /* ICMP "port unreachable" (the controller is starting): clear
+             * it, the datagram goes again */
+            int e;
+            socklen_t len = sizeof(e);
+            getsockopt(l->fd, SOL_SOCKET, SO_ERROR, &e, &len);
+            continue;
+        }
+        if (p.revents & (POLLERR | POLLHUP | POLLNVAL)) {
+            lnb_close(l);
+            return -ETIMEDOUT;
+        }
+        if (got >= sizeof(buf) - 1)
+            got = 0; /* a line that long is not a reply */
+        const ssize_t r = read(l->fd, buf + got, sizeof(buf) - 1 - got);
+        if (r < 0 && (errno == EAGAIN || errno == EINTR || l->is_udp))
+            continue;
+        if (r <= 0) {
+            lnb_close(l);
+            return -ETIMEDOUT;
+        }
+        if (l->is_udp) {
+            buf[r] = '\n'; /* one datagram, one line */
+            got = r + 1;
+        } else {
+            got += r;
+        }
+        /* complete lines */
+        char* line = buf;
+        char* nl;
+        while ((nl = memchr(line, '\n', got - (line - buf)))) {
+            *nl = 0;
+            if (nl > line && nl[-1] == '\r')
+                nl[-1] = 0;
+            const char* s = line;
+            line = nl + 1;
+            if (tag[0]) {
+                if (strncmp(s, tag, strlen(tag)))
+                    continue;
+                s += strlen(tag);
+            }
+            const int ok = !strncasecmp(s, "OK", 2) && (!s[2] || s[2] == ' ');
+            const int err = !strncasecmp(s, "ERR", 3) && (!s[3] || s[3] == ' ');
+            if (!ok && !err)
+                continue;
+            if (out && outsz) {
+                const char* rest = s + (ok ? 2 : 3);
+                while (*rest == ' ')
+                    rest++;
+                snprintf(out, outsz, "%s", rest);
+            }
+            return ok ? 0 : -EIO;
+        }
+        got -= line - buf;
+        memmove(buf, line, got);
+    }
+}
+
+/* HELLO, until the controller answers (the ESP takes ~2 s after a reset) */
+static void lnb_hello(struct lnb* l, double timeout)
+{
+    char r[128];
+    const double end = now() + timeout;
+    do {
+        const double t = now();
+        const int rc = lnb_xfer(l, "HELLO", 0, 0.25, r, sizeof(r));
+        if (rc == -ETIMEDOUT) {
+            const double wait = t + 0.25 - now(); /* the device is not there (yet) */
+            if (wait > 0 && now() + wait < end) {
+                struct timespec ts = { 0, (long)(wait * 1e9) };
+                nanosleep(&ts, NULL);
+            }
+            continue;
+        }
+        int proto = 0, outputs = 0;
+        char caps[96] = "";
+        if (!rc && sscanf(r, "dvbrx-lnb %d %d %95s", &proto, &outputs, caps) >= 2 && proto >= 1) {
+            l->proto = 1;
+            l->caps = (strstr(caps, "off") ? LNB_OFF : 0) | (strstr(caps, "diseqc") ? LNB_DISEQC : 0) |
+                      (strstr(caps, "burst") ? LNB_BURST : 0);
+            snprintf(l->ident, sizeof(l->ident), "%s", r);
+            fprintf(stderr, "LNB: controller %s\n", r);
+        } else {
+            /* another controller: plain commands, everything supported */
+            l->proto = 0;
+            l->caps = LNB_OFF | LNB_DISEQC | LNB_BURST;
+            fprintf(stderr, "LNB: plain controller (HELLO: %s)\n", rc ? "ERR" : r);
+        }
+        return;
+    } while (now() < end);
+    fprintf(stderr, "LNB: no answer to HELLO\n");
+}
+
+/* STATUS: the state as the controller has it (its web page, MQTT... may
+ * have changed it) */
+static void lnb_status(struct lnb* l)
+{
+    char r[128];
+    if (l->proto != 1 || lnb_xfer(l, "STATUS", 1, 1.0, r, sizeof(r)))
+        return;
+    const char* v = strstr(r, "volt=");
+    const char* t = strstr(r, "tone=");
+    if (v)
+        l->voltage = !strncmp(v + 5, "13", 2) ? SEC_VOLTAGE_13 : !strncmp(v + 5, "18", 2) ? SEC_VOLTAGE_18 : SEC_VOLTAGE_OFF;
+    if (t)
+        l->tone = t[5] == '1' ? SEC_TONE_ON : SEC_TONE_OFF;
+}
+
 static int lnb_open(struct lnb* l, const char* spec)
 {
-    l->fd = -1;
-    l->is_udp = 0;
-    l->voltage = l->tone = l->diseqc_len = -1;
+    *l = (struct lnb){ .fd = -1, .proto = -1, .voltage = -1, .tone = -1, .diseqc_len = -1 };
+    pthread_mutex_init(&l->mu, NULL);
     if (!spec || !strcmp(spec, "none"))
         return 0;
     if (!strncmp(spec, "serial:", 7)) {
-        l->fd = open(spec + 7, O_RDWR | O_NOCTTY);
-        if (l->fd < 0) {
-            perror(spec + 7);
-            return -1;
+        snprintf(l->path, sizeof(l->path), "%s", spec + 7);
+    } else if (!strncmp(spec, "udp:", 4)) {
+        snprintf(l->host, sizeof(l->host), "%s", spec + 4);
+        char* colon = strrchr(l->host, ':');
+        snprintf(l->port, sizeof(l->port), "%s", colon ? colon + 1 : "5199");
+        if (colon)
+            *colon = 0;
+        if (l->host[0] == '[' && strchr(l->host, ']')) { /* [IPv6] */
+            memmove(l->host, l->host + 1, strlen(l->host));
+            *strchr(l->host, ']') = 0;
         }
-        struct termios t;
-        tcgetattr(l->fd, &t);
-        cfmakeraw(&t);
-        cfsetspeed(&t, B115200);
-        tcsetattr(l->fd, TCSANOW, &t);
-        return 0;
-    }
-    if (!strncmp(spec, "udp:", 4)) {
-        char host[256];
-        snprintf(host, sizeof(host), "%s", spec + 4);
-        char* colon = strrchr(host, ':');
-        if (!colon)
-            return -1;
-        *colon = 0;
-        struct addrinfo hints = { .ai_family = AF_UNSPEC, .ai_socktype = SOCK_DGRAM }, *ai;
-        if (getaddrinfo(host, colon + 1, &hints, &ai))
-            return -1;
-        l->fd = socket(ai->ai_family, SOCK_DGRAM, 0);
-        if (l->fd >= 0 && connect(l->fd, ai->ai_addr, ai->ai_addrlen)) {
-            close(l->fd);
-            l->fd = -1;
-        }
-        freeaddrinfo(ai);
         l->is_udp = 1;
-        return l->fd < 0 ? -1 : 0;
+    } else {
+        fprintf(stderr, "unknown LNB controller \"%s\"\n", spec);
+        return -1;
     }
-    fprintf(stderr, "unknown LNB controller \"%s\"\n", spec);
-    return -1;
+    l->on = 1;
+    if (lnb_connect(l))
+        fprintf(stderr, "LNB: %s: not available yet\n", spec + (l->is_udp ? 4 : 7));
+    lnb_hello(l, 3.0);
+    lnb_status(l);
+    return 0;
 }
 
-/* Sends one command line, waits for "OK" or "ERR ...". Returns 0 or -EIO. */
+/* This controller always powers the LNB (HELLO without "off") */
+static int lnb_no_off(const struct lnb* l)
+{
+    return l->proto == 1 && !(l->caps & LNB_OFF);
+}
+
+/* Sends one command, waits for OK / ERR. Returns 0 or -EIO. */
 static int lnb_command(struct lnb* l, const char* cmd)
 {
     fprintf(stderr, "LNB: %s\n", cmd);
-    if (l->fd < 0)
+    if (!l->on)
         return 0;
-    char line[128];
-    int n = snprintf(line, sizeof(line), "%s\n", cmd);
-    if (write(l->fd, line, n) != n)
-        return -EIO;
-    /* one reply line, 1 s timeout */
-    size_t got = 0;
-    const double deadline = now() + 1.0;
-    while (got < sizeof(line) - 1) {
-        struct pollfd p = { .fd = l->fd, .events = POLLIN };
-        int ms = (int)((deadline - now()) * 1e3);
-        if (ms <= 0 || poll(&p, 1, ms) <= 0)
-            break;
-        ssize_t r = read(l->fd, line + got, sizeof(line) - 1 - got);
-        if (r <= 0)
-            break;
-        got += r;
-        if (l->is_udp || memchr(line, '\n', got))
-            break;
+    pthread_mutex_lock(&l->mu);
+    if (l->proto < 0) /* not there at the start: ask again */
+        lnb_hello(l, 0.5);
+    int rc = 0;
+    if (!strcmp(cmd, "VOLT OFF") && lnb_no_off(l)) {
+        /* this controller always powers the LNB: nothing to do */
+    } else {
+        char r[128];
+        rc = lnb_xfer(l, cmd, l->proto == 1, 1.0, r, sizeof(r));
+        if (rc == -ETIMEDOUT && l->fd < 0 && !l->is_udp) {
+            /* the port came back (USB enumerated again): once more */
+            lnb_hello(l, 3.0);
+            rc = lnb_xfer(l, cmd, l->proto == 1, 1.0, r, sizeof(r));
+        }
+        if (rc == -EIO)
+            fprintf(stderr, "LNB: controller answered \"ERR %s\"\n", r);
+        else if (rc)
+            fprintf(stderr, "LNB: controller answered nothing\n");
+        rc = rc ? -EIO : 0;
     }
-    line[got] = 0;
-    if (!strncmp(line, "OK", 2))
-        return 0;
-    fprintf(stderr, "LNB: controller answered \"%s\"\n", got ? strtok(line, "\r\n") : "nothing");
-    return -EIO;
+    pthread_mutex_unlock(&l->mu);
+    return rc;
+}
+
+/* STATUS from outside the exchanges above */
+static void lnb_refresh(struct lnb* l)
+{
+    if (!l->on)
+        return;
+    pthread_mutex_lock(&l->mu);
+    lnb_status(l);
+    pthread_mutex_unlock(&l->mu);
 }
 
 /* "auto", "1/2", ... "7/8" -> enum drx_dvbs_rate, -1 if invalid */
@@ -1409,6 +1616,9 @@ static int lnb_event(struct bridge* b, const struct dvbrx_event* ev)
      * adapter receives is refused while that adapter is in use; repeating
      * the current state is accepted (and not sent again). */
     const int shared = b->hub && hub_active(b->hub, b);
+    /* the controller's web page, MQTT... may have changed the state */
+    if (shared)
+        lnb_refresh(l);
     char cmd[64];
     switch (ev->type) {
     case DVBRX_EV_VOLTAGE:
@@ -1416,7 +1626,8 @@ static int lnb_event(struct bridge* b, const struct dvbrx_event* ev)
             return 0;
         if (shared)
             return -EBUSY;
-        l->voltage = (int)ev->voltage;
+        if (ev->voltage != SEC_VOLTAGE_OFF || !lnb_no_off(l)) /* else it stays powered */
+            l->voltage = (int)ev->voltage;
         snprintf(cmd, sizeof(cmd), "VOLT %s",
                  ev->voltage == SEC_VOLTAGE_13   ? "13"
                  : ev->voltage == SEC_VOLTAGE_18 ? "18"
@@ -1614,11 +1825,15 @@ static void status_json(struct sbuf* o)
     sb_num(o, "input_dbm", running && !r->file ? r->level_dbfs - r->gain + ctl_input_offset : NAN, 1);
     sb_printf(o, ", \"overflows\": %llu, \"filled\": %llu, \"running\": %s", (unsigned long long)r->overflows,
               (unsigned long long)r->filled, running ? "true" : "false");
-    const struct lnb* l = ctl_b[0].lnb && ctl_b[0].lnb->fd >= 0 ? ctl_b[0].lnb : NULL;
-    sb_printf(o, ", \"lnb\": {\"present\": %s, \"volt\": \"%s\", \"tone\": %s}}, \"channels\": [",
+    const struct lnb* l = ctl_b[0].lnb && ctl_b[0].lnb->on ? ctl_b[0].lnb : NULL;
+    sb_printf(o, ", \"lnb\": {\"present\": %s, \"volt\": \"%s\", \"tone\": %s, \"controller\": \"",
               l ? "true" : "false",
               !l ? "off" : l->voltage == SEC_VOLTAGE_13 ? "13" : l->voltage == SEC_VOLTAGE_18 ? "18" : "off",
               l && l->tone == SEC_TONE_ON ? "true" : "false");
+    for (const char* c = l ? l->ident : ""; *c; c++) /* text from the controller */
+        if (*c >= ' ' && *c < 127 && *c != '"' && *c != '\\')
+            sb_printf(o, "%c", *c);
+    sb_printf(o, "\"}}, \"channels\": [");
     for (int i = 0; i < ctl_n; i++) {
         const struct bridge* b = &ctl_b[i];
         static const char* const modes[] = { "tuned", "probe", "monitor" };
@@ -1860,7 +2075,7 @@ static void ctl_request(const char* req, struct sbuf* o)
     }
     if (!strcmp(cmd, "lnb")) {
         pthread_mutex_lock(&ctl_lock);
-        struct lnb* l = b->lnb && b->lnb->fd >= 0 ? b->lnb : NULL;
+        struct lnb* l = b->lnb && b->lnb->on ? b->lnb : NULL;
         char v[8];
         int rc = 0;
         if (!l) {
@@ -1869,7 +2084,9 @@ static void ctl_request(const char* req, struct sbuf* o)
             snprintf(err, sizeof(err), "busy");
         } else {
             if (json_str(req, "volt", v, sizeof(v))) {
-                l->voltage = !strcmp(v, "13") ? SEC_VOLTAGE_13 : !strcmp(v, "18") ? SEC_VOLTAGE_18 : SEC_VOLTAGE_OFF;
+                const int volt = !strcmp(v, "13") ? SEC_VOLTAGE_13 : !strcmp(v, "18") ? SEC_VOLTAGE_18 : SEC_VOLTAGE_OFF;
+                if (volt != SEC_VOLTAGE_OFF || !lnb_no_off(l))
+                    l->voltage = volt;
                 char c[16];
                 snprintf(c, sizeof(c), "VOLT %s", !strcmp(v, "13") ? "13" : !strcmp(v, "18") ? "18" : "OFF");
                 rc |= lnb_command(l, c);
@@ -2661,7 +2878,7 @@ static void help(const char* prog)
           "  -n COUNT          adapters N, N+1... served from one wideband capture\n"
           "  -W HZ             that capture's rate (default 30.72e6)\n"
           "  -L LNB            LNB controller: none (default), serial:/dev/ttyACM0 or\n"
-          "                    udp:HOST:PORT\n"
+          "                    udp:HOST[:PORT] (5199 by default)\n"
           "  -C PATH           control socket for dvbrx-web (default /run/dvbrx/dvbrx-N.sock,\n"
           "                    \"\": none)\n"
           "  -P DB             input power estimate: dBm at 0 dBFS and 0 dB gain (default 0)\n"

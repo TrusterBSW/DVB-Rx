@@ -253,8 +253,12 @@ LNB controller (13/18 V, 22 kHz, DiSEqC):
 (default),
 .BI serial: DEVICE
 or
-.BI udp: HOST : PORT\c
-\&.
+.BI udp: HOST [: PORT]
+(port 5199 by default; HOST may be a NAME.local resolved through mDNS).
+The text protocol is described in doc/lnb\-protocol.md; a controller that
+cannot switch the LNB off (no
+.B off
+in its HELLO reply) keeps it powered when the application asks for 0 V.
 .TP
 .BI \-C " PATH"
 Control socket for

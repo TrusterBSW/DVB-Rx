@@ -249,8 +249,12 @@ Contrôleur du LNB (13/18 V, 22 kHz, DiSEqC) :
 (défaut),
 .BI serial: PÉRIPHÉRIQUE
 ou
-.BI udp: HÔTE : PORT\c
-\&.
+.BI udp: HÔTE [: PORT]
+(port 5199 par défaut ; HÔTE peut être un NOM.local résolu par mDNS).
+Le protocole texte est décrit dans doc/lnb\-protocol.md ; un contrôleur qui ne
+sait pas couper le LNB (pas de
+.B off
+dans sa réponse à HELLO) le laisse alimenté quand l'application demande 0 V.
 .TP
 .BI \-C " CHEMIN"
 Socket de contrôle pour
